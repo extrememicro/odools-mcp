@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.log
+*.tgz
+*.tar.gz
+*.zip
+.env
+.env.*
+!.env.example
+@tmp/
+@reports/
+@logs/
+@data/
+@exports/
+coverage/
+.nyc_output/
+.DS_Store

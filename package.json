@@ -1,0 +1,70 @@
+{
+  "name": "@pyming/odools-mcp",
+  "version": "0.1.0",
+  "description": "OpenCode V2 MCP adapter for pinned OdooLS code navigation",
+  "private": true,
+  "license": "AGPL-3.0-or-later",
+  "author": "Extreme Micro SL <hola@pyming.com>",
+  "maintainers": [
+    "Extreme Micro SL <hola@pyming.com>"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/extrememicro/odools-mcp.git"
+  },
+  "homepage": "https://github.com/extrememicro/odools-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/extrememicro/odools-mcp/issues"
+  },
+  "type": "module",
+  "files": [
+    "dist/**/*.js",
+    "examples/*.json",
+    "examples/*.jsonc",
+    "CONTRIBUTING.md",
+    "LICENSE",
+    "README.md",
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "bin": {
+    "odools-mcp": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "lint": "eslint src test scripts",
+    "check-package": "node scripts/check-package.mjs",
+    "check-release": "node scripts/check-release.mjs",
+    "check-source": "node scripts/check-source-hygiene.mjs",
+    "test:hygiene-negative": "node scripts/check-source-hygiene.mjs --self-test",
+    "test:process": "node scripts/process-smoke.mjs",
+    "test:package": "node scripts/package-smoke.mjs",
+    "prepack": "npm run build && npm run check-package"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "chokidar": "4.0.3",
+    "smol-toml": "1.8.0",
+    "tar-stream": "3.1.7",
+    "yauzl": "3.4.0",
+    "zod": "4.6.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.35.0",
+    "@types/node": "24.3.1",
+    "@types/tar-stream": "3.1.4",
+    "@types/yauzl": "2.10.3",
+    "@types/yazl": "3.3.0",
+    "eslint": "9.35.0",
+    "typescript": "5.9.2",
+    "typescript-eslint": "8.42.0",
+    "vitest": "3.2.4",
+    "yazl": "3.3.1"
+  }
+}

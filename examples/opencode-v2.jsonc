@@ -1,0 +1,10 @@
+{
+  "mcp": {
+    "servers": {
+      "odools": {
+        "type": "local",
+        "command": ["odools-mcp", "serve", "--discover-workspace"]
+      }
+    }
+  }
+}

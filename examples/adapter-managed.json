@@ -1,0 +1,7 @@
+{
+  "workspace": "./path/to/odoo/custom/src",
+  "runtimeDir": "./.odools-runtime",
+  "config": "./odools.toml",
+  "profile": "default",
+  "allowedRoots": []
+}

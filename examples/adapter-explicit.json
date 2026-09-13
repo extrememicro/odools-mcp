@@ -1,0 +1,9 @@
+{
+  "workspace": "./path/to/odoo/custom/src",
+  "binary": "./path/to/odoo_ls_server",
+  "config": "./odools.toml",
+  "profile": "default",
+  "tsserver": "./path/to/node_modules/.bin/tsserver",
+  "tsserverVersion": "6.0.2",
+  "allowedRoots": []
+}

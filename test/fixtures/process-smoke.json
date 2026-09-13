@@ -1,0 +1,12 @@
+{
+  "definition": {
+    "path": "account-financial-tools/account_invoice_constraint_chronology/model/account_move.py",
+    "line": 12,
+    "column": 19
+  },
+  "references": {
+    "path": "account-financial-tools/account_invoice_constraint_chronology/model/account_move.py",
+    "line": 12,
+    "column": 19
+  }
+}
