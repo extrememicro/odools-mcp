@@ -58,6 +58,76 @@ describe("readiness", () => {
     expect(tracker.snapshot(Date.now() + 100).javascriptState).toBe("pending");
     tracker.setJavascriptStatus(true); expect(tracker.snapshot(Date.now() + 100).javascriptState).toBe("ready");
   });
+  it("keeps reporting ready when ordinary response traffic only touches activity", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    const at = Date.now() + 1000;
+    const ready = tracker.snapshot(at); expect(ready.state).toBe("ready");
+    // Ordinary inbound response for a semantic request: activity advances, state must stay truthful.
+    tracker.touch();
+    const afterResponse = tracker.snapshot(at);
+    expect(afterResponse.state).toBe("ready"); expect(afterResponse.coreReady).toBe(true);
+    expect(afterResponse.loading).toBe(false); expect(afterResponse.progressActive).toBe(0);
+    expect(afterResponse.lastActivityAt).toBeGreaterThanOrEqual(ready.lastActivityAt);
+  });
+  it("reports indexing only for explicit loading or work-done progress evidence", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+    tracker.setLoading(true);
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("indexing");
+    tracker.setLoading(false);
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+    tracker.progressBegin("indexing-token");
+    const progressing = tracker.snapshot(Date.now() + 1000);
+    expect(progressing.state).toBe("indexing"); expect(progressing.progressActive).toBe(1);
+    tracker.progressEnd("indexing-token");
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+  });
+  it("re-opens the quiet window for real indexing evidence but not for traffic", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    const now = Date.now();
+    // Real loading evidence restarts the quiet window: not ready until quietMs elapsed after loading stopped.
+    tracker.setLoading(true); tracker.setLoading(false);
+    expect(tracker.snapshot(now).state).toBe("indexing");
+    expect(tracker.snapshot(now + 1000).state).toBe("ready");
+    // Traffic alone never re-opens it.
+    tracker.touch(); expect(tracker.snapshot(now + 1000).state).toBe("ready");
+  });
+  it("waits the configured quiet period during cold activation before reporting ready", () => {
+    const tracker = new ReadinessTracker(1_000, false);
+    tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    const now = Date.now();
+    expect(tracker.isReady(now)).toBe(false); expect(tracker.snapshot(now).state).toBe("indexing");
+    expect(tracker.isReady(now + 999)).toBe(false);
+    expect(tracker.isReady(now + 1_000)).toBe(true); expect(tracker.snapshot(now + 1_000).state).toBe("ready");
+  });
+  it("ignores redundant loading stop but signals a real loading cycle", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    const readyAt = Date.now() + 1000; expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.setLoading(false); expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.setLoading(true); expect(tracker.snapshot().state).toBe("indexing");
+    tracker.setLoading(false); expect(tracker.snapshot().state).toBe("indexing");
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+  });
+  it("fingerprints configuration so unchanged repeats are inert and material changes signal", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true);
+    const initial = [{ level: 1, message: "profile default" }]; tracker.setConfiguration(initial); tracker.setLoading(false);
+    const readyAt = Date.now() + 1000; expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.setConfiguration([{ level: 1, message: "profile default" }]);
+    expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.setConfiguration([{ level: 1, message: "profile changed" }]);
+    expect(tracker.snapshot().state).toBe("indexing");
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+  });
+  it("ignores duplicate and unknown progress tokens but preserves balanced transitions", () => {
+    const tracker = new ReadinessTracker(100, false); tracker.setAlive(true); tracker.setConfiguration([]); tracker.setLoading(false);
+    const readyAt = Date.now() + 1000; expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.progressEnd("missing"); expect(tracker.snapshot(readyAt).state).toBe("ready");
+    tracker.progressBegin("work"); expect(tracker.snapshot().state).toBe("indexing");
+    tracker.progressBegin("work"); expect(tracker.snapshot().progressActive).toBe(1);
+    tracker.progressEnd("work"); expect(tracker.snapshot().state).toBe("indexing");
+    expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+    tracker.progressEnd("work"); expect(tracker.snapshot(Date.now() + 1000).state).toBe("ready");
+  });
 });
 
 describe("path confinement", () => {

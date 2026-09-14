@@ -36,6 +36,11 @@ process.stdin.on("data", (chunk) => {
       if (message.id === 900) received.configuredProfile = message.result?.[0]?.selectedProfile ?? null;
       reverse.delete(message.id); record(); globalThis.completeInitialize?.();
     } else if (message.method === "test/getReceived") send({ jsonrpc: "2.0", id: message.id, result: received });
+    else if (message.method === "test/readinessNotifications") {
+      const notifications = Array.isArray(message.params) ? message.params : [];
+      for (const notification of notifications) send({ jsonrpc: "2.0", method: notification.method, params: notification.params });
+      send({ jsonrpc: "2.0", id: message.id, result: null });
+    }
     else if (message.method === "shutdown") send({ jsonrpc: "2.0", id: message.id, result: null });
     else if (message.method === "slow") setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: null }), 500);
     else if (message.method === "test/crash") { if (crashMarker) { try { appendFileSync(crashMarker, "x"); } catch {} } process.exit(7); }

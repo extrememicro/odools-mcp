@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdtemp, mkdir, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -26,6 +26,50 @@ async function received(session: LspSession): Promise<any> { return await sessio
 function expectPidGone(pid: number): void { expect(() => process.kill(pid, 0)).toThrow(); }
 
 describe("LSP session", () => {
+  it("keeps reporting ready for warm requests and returns to ready after real loading", async () => {
+    const session = await start();
+    expect(session.readiness.snapshot().state).toBe("ready");
+    // Warm semantic-style request: its own response must not flip state to indexing.
+    await session.request("textDocument/definition", {});
+    const afterRequest = session.readiness.snapshot();
+    expect(afterRequest.state).toBe("ready"); expect(afterRequest.coreReady).toBe(true);
+    expect(afterRequest.loading).toBe(false); expect(afterRequest.progressActive).toBe(0);
+    // Real loading evidence after readiness must be reported, then return to ready.
+    session.readiness.setLoading(true);
+    expect(session.readiness.snapshot().state).toBe("indexing");
+    session.readiness.setLoading(false);
+    await waitFor(() => session.readiness.snapshot().state === "ready");
+    await session.request("textDocument/references", {});
+    expect(session.readiness.snapshot().state).toBe("ready");
+  });
+
+  it("keeps warm readiness through redundant transport notifications", async () => {
+    const session = await start(); expect(session.readiness.snapshot().state).toBe("ready");
+    await session.request("test/readinessNotifications", [
+      { method: "$Odoo/loadingStatusUpdate", params: "stop" },
+      { method: "$Odoo/setConfiguration", params: [] },
+      { method: "$/progress", params: { token: "unknown", value: { kind: "end" } } },
+    ]);
+    const snapshot = session.readiness.snapshot();
+    expect(snapshot.state).toBe("ready"); expect(snapshot.coreReady).toBe(true);
+    expect(snapshot.loading).toBe(false); expect(snapshot.progressActive).toBe(0);
+  });
+
+  it("drives real loading and progress transitions through transport", async () => {
+    const session = await start();
+    await session.request("test/readinessNotifications", [
+      { method: "$Odoo/loadingStatusUpdate", params: "start" },
+      { method: "$/progress", params: { token: "index", value: { kind: "begin" } } },
+    ]);
+    expect(session.readiness.snapshot()).toMatchObject({ state: "indexing", loading: true, progressActive: 1 });
+    await session.request("test/readinessNotifications", [
+      { method: "$Odoo/loadingStatusUpdate", params: "stop" },
+      { method: "$/progress", params: { token: "index", value: { kind: "end" } } },
+    ]);
+    expect(session.readiness.snapshot().state).toBe("indexing");
+    await waitFor(() => session.readiness.snapshot().state === "ready");
+  });
+
   it("uses the exact selected-config argument and answers workspace/configuration", async () => {
     const session = await start({ profile: "production" });
     const log = await received(session);
@@ -73,8 +117,15 @@ describe("LSP session", () => {
     const base = await fixture();
     const inside = join(base.workspace, "logs"); await mkdir(inside);
     await expect(loadConfig({ ...base, guard: undefined, binary: base.binary, runtimeDir: undefined, logsDirectory: inside })).rejects.toThrow(/outside workspace/);
-    const runtimeLogs = await mkdtemp(join(resolve(base.binary, ".."), "unsafe-logs-"));
-    await expect(loadConfig({ ...base, guard: undefined, binary: base.binary, runtimeDir: undefined, logsDirectory: runtimeLogs })).rejects.toThrow(/outside workspace and managed runtime/);
+    const binaryDirectory = await mkdtemp(join(tmpdir(), "odools-unsafe-binary-"));
+    try {
+      const binary = join(binaryDirectory, "fake-lsp.mjs");
+      await copyFile(base.binary, binary); await chmod(binary, 0o755);
+      const runtimeLogs = await mkdtemp(join(binaryDirectory, "unsafe-logs-"));
+      await expect(loadConfig({ ...base, guard: undefined, binary, runtimeDir: undefined, logsDirectory: runtimeLogs })).rejects.toThrow(/outside workspace and managed runtime/);
+    } finally {
+      await rm(binaryDirectory, { force: true, recursive: true });
+    }
     const file = join(tmpdir(), `odools-logs-file-${Date.now()}`); await writeFile(file, "x");
     await expect(loadConfig({ ...base, guard: undefined, binary: base.binary, runtimeDir: undefined, logsDirectory: file })).rejects.toThrow(/non-symlink directory/);
     const target = await mkdtemp(join(tmpdir(), "odools-logs-target-")); const link = `${target}-link`; await symlink(target, link);
