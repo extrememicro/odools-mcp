@@ -1,11 +1,13 @@
 # odools-mcp
 
-`odools-mcp` is a local Model Context Protocol (MCP) adapter that exposes precise, position-based Odoo code navigation through the official, unmodified OdooLS runtime. It provides exactly four read-only tools:
+`odools-mcp` is a local Model Context Protocol (MCP) adapter that exposes precise, position-based Odoo code navigation through the official, unmodified OdooLS runtime. It publishes exactly four read-only MCP tool leaves:
 
-- `odools_status`
-- `odools_definition`
-- `odools_declaration`
-- `odools_references`
+- `status`
+- `definition`
+- `declaration`
+- `references`
+
+MCP clients qualify those leaves with the configured server name. With the recommended server name `odools`, OpenCode exposes `odools_status`, `odools_definition`, `odools_declaration`, and `odools_references`; OpenCode Code Mode uses `tools.odools.status`, `tools.odools.definition`, `tools.odools.declaration`, and `tools.odools.references`. Other clients may render qualified names differently depending on their version, but the raw MCP leaves above are authoritative.
 
 The adapter is maintained by **Extreme Micro SL <hola@pyming.com>** at <https://github.com/extrememicro/odools-mcp>. It is independent software: it is not affiliated with or endorsed by Odoo S.A. or the OdooLS maintainers. It does not fork, vendor, or modify OdooLS.
 
@@ -48,7 +50,7 @@ Selection was evidence-driven rather than based only on the newest version numbe
 The MCP connection is lightweight and initially **dormant**:
 
 1. The client connects to `odools-mcp` over stdio without starting OdooLS.
-2. `odools_status` reports lifecycle and readiness without activating OdooLS.
+2. The raw `status` tool reports lifecycle and readiness without activating OdooLS.
 3. The first definition, declaration, or references call performs one shared cold activation and waits for readiness.
 4. Concurrent cold calls share that activation; subsequent calls reuse the warm backend.
 5. After activation, bounded source watching keeps open relevant files fresh, and bounded automatic restart can recover from a backend crash.
@@ -132,7 +134,41 @@ Without `--workspace`, discovery starts at the MCP process working directory and
 - validated Doodba layouts, selecting exactly `<doodba-root>/odoo/custom/src` as the workspace;
 - conservative conventional source trees with Odoo core markers and immediate-child addon repositories.
 
-Discovery canonicalizes paths, identifies immediate-child addon roots by addon manifests, and resolves Python from `--python`, an eligible Doodba `.venv`, or `python3` on `PATH`. It fails closed for ambiguous layouts, non-Odoo locations, invalid executables, and relevant symlink escapes. It does not call Git, Docker, or the network, execute project code, import Odoo, or parse arbitrary Python. Generated OdooLS TOML, tsserver shim, and private log directories are temporary and are cleaned after shutdown.
+Discovery canonicalizes paths and resolves Python from `--python`, an eligible `<workspace>/.venv/bin/python`, or `python3` on `PATH`. Conventional source trees use immediate-child addon roots, plus the workspace root itself when it carries Odoo core markers. Doodba discovery instead reproduces the effective addon namespace:
+
+- `addons.yaml` (or `addons.yml`) defines eligible repositories and module patterns. `ONLY` uses the MCP process environment when values are available; documents with otherwise-matching unset variables remain conditionally unknown and are reconciled against generated addon links. Discovery does not read Compose, `.env`, or `.docker` environment files or expose environment values; malformed `ONLY` mappings fail closed;
+- the exact `private` root follows Doodba's special highest-priority semantics, while similarly named sibling directories have no special status;
+- `repos.yaml` describes checkout provenance and does not define module selection or duplicate precedence;
+- validated links in `odoo/auto/addons` identify the concrete runtime winner for each module;
+- repository roots are ordered so OdooLS's first-wins resolution matches those generated winners.
+
+This excludes unselected backup or copied repositories by configuration, not directory-name heuristics. Before OdooLS starts, the adapter simulates duplicate resolution and fails closed if configuration and generated state disagree, links are unsafe or malformed, or repository-level ordering cannot represent the runtime winners. It never falls back to indexing every candidate repository.
+
+The lightweight MCP remains connected after such a failure. All four tools stay available: `status` returns a structured recovery diagnostic, while `definition`, `declaration`, and `references` return zero locations, an error, and a recommendation to use exact textual inspection as a non-authoritative fallback.
+
+For missing, unstable, or stale generated state, including configuration/generated and winner mismatches, refresh a normal Doodba development environment with `invoke stop start`, restart the client from the intended workspace location, and call raw `status` again (shown as `odools_status` in OpenCode and `tools.odools.status` in Code Mode with the recommended server name). Precedence cycles, duplicate or unevaluable configuration, and unsafe paths or links require correcting the underlying layout rather than repeated retries; unsafe path and link conditions are non-recoverable until corrected.
+
+Successful status includes an additive `discovery` object. Conventional mode reports `mode`, `source`, and `status` only; Doodba mode adds bounded module/root/duplicate/inactive counts, an optional count of conditionally unknown selections resolved from generated links, a generated-state fingerprint, and warnings capped at 20 with a truncation flag. Failed discovery status includes a sanitized error code, recovery flags, a message truncated to 240 characters, an always-empty `details` array, and a fixed action list capped at four entries. Diagnostics do not expose source contents, environment values, remote credentials, or exception stacks.
+
+```json
+{
+  "discovery": {
+    "mode": "doodba-reconciled",
+    "source": "addons.yaml+odoo/auto/odoo.conf",
+    "status": "ready",
+    "effectiveModuleCount": 1774,
+    "effectiveRootCount": 26,
+    "shadowedDuplicateCount": 11,
+    "inactiveExposedCount": 3,
+    "unknownConditionResolvedCount": 1,
+    "generatedFingerprint": "<sha256-hex>",
+    "warnings": [],
+    "warningsTruncated": false
+  }
+}
+```
+
+Discovery otherwise fails rather than guessing for ambiguous layouts, non-Odoo locations, invalid executables, and relevant path escapes. It does not call Git, Docker, or the network, execute project code, import Odoo, or parse arbitrary Python. The generated OdooLS TOML and tsserver shim live in a private temporary directory that the adapter owns and removes on a best-effort basis: once on normal shutdown (SIGINT, SIGTERM, stdin end, or process exit) and once when startup fails after generation. Removal is idempotent, a failed removal is reported to stderr without aborting shutdown, and abnormal termination such as SIGKILL can leave the directory behind. Session log directories are removed only when the adapter created them; an operator-supplied logs directory is never deleted.
 
 The default managed runtime directory is `$XDG_DATA_HOME/odools-mcp/runtime-1.5.2`, or `$HOME/.local/share/odools-mcp/runtime-1.5.2` when `XDG_DATA_HOME` is unset. It must already pass verification.
 

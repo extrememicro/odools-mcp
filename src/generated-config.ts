@@ -5,6 +5,23 @@ import type { DiscoveredOdooWorkspace, GeneratedOdooConfig } from "./types.js";
 import { verifyRuntime } from "./runtime/manager.js";
 import { ENGINE_VERSION } from "./config.js";
 
+export type GeneratedConfigFailureStage = "runtime" | "temporary-config";
+
+export class GeneratedConfigError extends Error {
+  constructor(public readonly stage: GeneratedConfigFailureStage, public readonly code: string) {
+    super(code);
+    this.name = "GeneratedConfigError";
+  }
+}
+
+export interface GeneratedConfigDependencies {
+  verify: typeof verifyRuntime;
+  makeTempDirectory: typeof mkdtemp;
+  write: typeof writeFile;
+}
+
+const defaults: GeneratedConfigDependencies = { verify: verifyRuntime, makeTempDirectory: mkdtemp, write: writeFile };
+
 function safeTomlString(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")}"`;
 }
@@ -38,59 +55,38 @@ disable_semantic_tokens_xml = true
 export async function generateOdooConfig(
   discovery: DiscoveredOdooWorkspace,
   runtimeDirOverride?: string,
+  dependencies: GeneratedConfigDependencies = defaults,
 ): Promise<GeneratedOdooConfig> {
   const runtimeDir = runtimeDirOverride || resolve(
     process.env.XDG_DATA_HOME || resolve(process.env.HOME || "~", ".local", "share"),
     "odools-mcp",
     `runtime-${ENGINE_VERSION}`,
   );
-  const runtime = await verifyRuntime(runtimeDir);
-  const stdlibPath = resolve(runtimeDir, "typeshed", "stdlib");
-  if (!(await stat(stdlibPath).catch(() => undefined))?.isDirectory()) {
-    throw new Error(`OdooLS stdlib directory is missing: ${stdlibPath}`);
-  }
-  const runtimeBase = process.env.XDG_RUNTIME_DIR || tmpdir();
-  await mkdir(runtimeBase, { recursive: true, mode: 0o700 });
-  const tempDir = await mkdtemp(resolve(runtimeBase, "odools-config-"));
+  const runtime = await dependencies.verify(runtimeDir).catch(() => {
+    throw new GeneratedConfigError("runtime", "ODOOLS_RUNTIME_CONFIGURATION_FAILED");
+  });
+  let tempDir: string | undefined;
   try {
-    if (((await stat(tempDir)).mode & 0o777) !== 0o700) {
-      throw new Error(`Temp dir mode not 0700: ${tempDir}`);
-    }
+    const stdlibPath = resolve(runtimeDir, "typeshed", "stdlib");
+    if (!(await stat(stdlibPath).catch(() => undefined))?.isDirectory()) throw new Error("Missing runtime stdlib");
+    const runtimeBase = process.env.XDG_RUNTIME_DIR || tmpdir();
+    await mkdir(runtimeBase, { recursive: true, mode: 0o700 });
+    tempDir = await dependencies.makeTempDirectory(resolve(runtimeBase, "odools-config-"));
+    if (((await stat(tempDir)).mode & 0o777) !== 0o700) throw new Error("Unsafe temporary directory mode");
     const tomlPath = resolve(tempDir, "odools.toml");
     const shimPath = resolve(tempDir, "tsserver");
-    await writeFile(
-      shimPath,
-      `#!/bin/sh\nexec ${safeShellArgument(runtime.tsserver)} "$@"\n`,
-      { mode: 0o700 },
-    );
+    await dependencies.write(shimPath, `#!/bin/sh\nexec ${safeShellArgument(runtime.tsserver)} "$@"\n`, { mode: 0o700 });
     const shimInfo = await lstat(shimPath);
     await access(shimPath, constants.X_OK);
-    if (!shimInfo.isFile() || shimInfo.isSymbolicLink()) {
-      throw new Error(`Generated tsserver shim is not a regular executable: ${shimPath}`);
-    }
-    await writeFile(
-      tomlPath,
-      generateOdooToml(discovery, shimPath, stdlibPath),
-      { mode: 0o600 },
-    );
-    const adapter = {
-      workspace: discovery.workspace,
-      runtimeDir,
-      config: tomlPath,
-      profile: "default",
-      allowedRoots: discovery.addonRoots,
-      tsserverVersion: "6.0.2" as const,
-    };
-    const cleanup = async (): Promise<void> => {
-      try {
-        await rm(tempDir, { recursive: true, force: true });
-      } catch (error) {
-        console.warn(`odools-mcp: temp config cleanup failed for ${tempDir}:`, error);
-      }
-    };
+    if (!shimInfo.isFile() || shimInfo.isSymbolicLink()) throw new Error("Unsafe generated shim");
+    await dependencies.write(tomlPath, generateOdooToml(discovery, shimPath, stdlibPath), { mode: 0o600 });
+    const adapter = { workspace: discovery.workspace, runtimeDir, config: tomlPath, profile: "default", allowedRoots: discovery.addonRoots, tsserverVersion: "6.0.2" as const };
+    const ownedTempDir = tempDir;
+    const cleanup = async (): Promise<void> => { await rm(ownedTempDir, { recursive: true, force: true }).catch(() => {}); };
     return { adapter, tomlPath, cleanup };
   } catch (error) {
-    await rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    throw error;
+    if (tempDir) await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+    if (error instanceof GeneratedConfigError) throw error;
+    throw new GeneratedConfigError("temporary-config", "ODOOLS_TEMP_CONFIG_GENERATION_FAILED");
   }
 }

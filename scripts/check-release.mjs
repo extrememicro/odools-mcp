@@ -27,7 +27,7 @@ const expectedLicenseSha256 = "57c8ff33c9c0cfc3ef00e650a1cc910d7ee479a8bc509f6c9
 if (licenseSha256 !== expectedLicenseSha256) throw new Error(`LICENSE SHA-256 mismatch: ${licenseSha256}`);
 
 const notices = await readFile(new URL("THIRD_PARTY_NOTICES.md", root), "utf8");
-for (const required of ["OdooLS 1.5.2 Beta", "LGPL-3.0", "TypeScript 6.0.2", "Apache-2.0"]) {
+for (const required of ["OdooLS 1.5.2 Beta", "LGPL-3.0", "TypeScript 6.0.2", "Apache-2.0", "`js-yaml` | 4.3.2 | MIT", "Python-2.0"]) {
   if (!notices.includes(required)) throw new Error(`Third-party notices omit ${required}`);
 }
 
@@ -142,6 +142,7 @@ const expectedFiles = [
   "THIRD_PARTY_NOTICES.md",
   "dist/cli.js",
   "dist/config.js",
+  "dist/diagnostic.js",
   "dist/discovery.js",
   "dist/generated-config.js",
   "dist/lifecycle.js",
@@ -164,7 +165,7 @@ const expectedFiles = [
   "examples/opencode-v2.jsonc",
   "package.json",
 ].sort();
-if (expectedFiles.length !== 28) throw new Error(`Internal package manifest count is ${expectedFiles.length}, expected 28`);
+if (expectedFiles.length !== 29) throw new Error(`Internal package manifest count is ${expectedFiles.length}, expected 29`);
 if (JSON.stringify(files) !== JSON.stringify(expectedFiles)) throw new Error(`Unexpected package manifest:\n${JSON.stringify(files, null, 2)}`);
 const forbidden = /(^|\/)(node_modules|@tmp|test|tests|benchmark|benchmarks|corpus|\.git|@reports|@logs|@data|@exports)(\/|$)|\.(?:tgz|log)$/;
 const bad = files.filter((path) => forbidden.test(path));

@@ -44,27 +44,27 @@ suite("real generated discovery OdooLS integration", () => {
     await Promise.all([server.start(serverTransport), client.connect(clientTransport)]);
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
-      "odools_declaration",
-      "odools_definition",
-      "odools_references",
-      "odools_status",
+      "declaration",
+      "definition",
+      "references",
+      "status",
     ]);
-    const dormant = (await client.callTool({ name: "odools_status", arguments: {} })).structuredContent as Record<string, unknown>;
+    const dormant = (await client.callTool({ name: "status", arguments: {} })).structuredContent as Record<string, unknown>;
     expect(dormant).toMatchObject({ state: "dormant", processAlive: false, watcherDocumentCount: 0 });
     expect(server.lsp.childPid).toBeUndefined();
     const semanticPath = process.env.ODOOLS_REAL_SEMANTIC_PATH;
     const semanticLine = Number(process.env.ODOOLS_REAL_SEMANTIC_LINE ?? "0");
     const semanticColumn = Number(process.env.ODOOLS_REAL_SEMANTIC_COLUMN ?? "1");
     if (!semanticPath || semanticLine < 1) throw new Error("Set ODOOLS_REAL_SEMANTIC_PATH and ODOOLS_REAL_SEMANTIC_LINE for real integration");
-    const definition = await client.callTool({ name: "odools_definition", arguments: { path: semanticPath, line: semanticLine, column: semanticColumn } });
+    const definition = await client.callTool({ name: "definition", arguments: { path: semanticPath, line: semanticLine, column: semanticColumn } });
     expect(definition.isError).not.toBe(true); expect(server.lsp.childPid).toBeTypeOf("number");
     const activatedPid = server.lsp.childPid;
-    const references = await client.callTool({ name: "odools_references", arguments: { path: semanticPath, line: semanticLine, column: semanticColumn } });
+    const references = await client.callTool({ name: "references", arguments: { path: semanticPath, line: semanticLine, column: semanticColumn } });
     expect(references.isError).not.toBe(true); expect(server.lsp.childPid).toBe(activatedPid);
     let ready: Record<string, unknown> | undefined; const deadline = Date.now() + 30_000;
     do {
       await new Promise((settle) => setTimeout(settle, 250));
-      ready = (await client.callTool({ name: "odools_status", arguments: {} })).structuredContent as Record<string, unknown>;
+      ready = (await client.callTool({ name: "status", arguments: {} })).structuredContent as Record<string, unknown>;
     } while (!ready.coreReady && Date.now() < deadline);
     expect(ready.coreReady).toBe(true);
     await expect(verifyRuntime(runtimeDir)).resolves.toMatchObject({ binary: resolve(runtimeDir, "odoo_ls_server") });

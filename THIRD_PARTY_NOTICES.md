@@ -15,15 +15,16 @@ OdooLS is not forked, vendored, modified, or relicensed by `odools-mcp`. TypeScr
 
 ## npm production dependencies
 
-The production dependency inventory was derived from `package-lock.json` entries not marked `dev` and cross-checked against each installed package's `package.json` name, version, and declared license. At the documented lockfile baseline it contains 106 installed package entries, including nested copies, with these declared SPDX families:
+The production dependency inventory was derived from `package-lock.json` entries not marked `dev` and cross-checked against each installed package's `package.json` name, version, and declared license. At the documented lockfile baseline it contains 108 installed package entries, including nested copies, with these declared SPDX families:
 
 | Declared license | Entries |
 | --- | ---: |
-| MIT | 91 |
+| MIT | 92 |
 | Apache-2.0 | 4 |
 | ISC | 7 |
 | BSD-3-Clause | 3 |
 | BSD-2-Clause | 1 |
+| Python-2.0 | 1 |
 
 The direct production dependencies are:
 
@@ -31,6 +32,7 @@ The direct production dependencies are:
 | --- | --- | --- |
 | `@modelcontextprotocol/sdk` | 1.30.0 | MIT |
 | `chokidar` | 4.0.3 | MIT |
+| `js-yaml` | 4.3.2 | MIT |
 | `smol-toml` | 1.8.0 | BSD-3-Clause |
 | `tar-stream` | 3.1.7 | MIT |
 | `yauzl` | 3.4.0 | MIT |

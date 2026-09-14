@@ -13,6 +13,7 @@ const expectedPackageFiles = [
   "THIRD_PARTY_NOTICES.md",
   "dist/cli.js",
   "dist/config.js",
+  "dist/diagnostic.js",
   "dist/discovery.js",
   "dist/generated-config.js",
   "dist/lifecycle.js",

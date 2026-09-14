@@ -4,10 +4,11 @@ import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { installRuntime, verifyRuntime, type PreseedAssets } from "./runtime/manager.js";
 import { LifecycleCoordinator, ShutdownCoordinator } from "./lifecycle.js";
-import { OdooLsMcpServer } from "./server.js";
+import { DiagnosticMcpServer, OdooLsMcpServer } from "./server.js";
 import { discoverWorkspace } from "./discovery.js";
-import { generateOdooConfig } from "./generated-config.js";
-import type { GeneratedOdooConfig } from "./types.js";
+import { createDiscoveryDiagnostic, safeDiscoverySummary } from "./diagnostic.js";
+import { generateOdooConfig, GeneratedConfigError } from "./generated-config.js";
+import type { DiscoveredOdooWorkspace, GeneratedOdooConfig } from "./types.js";
 
 function option(args: string[], name: string, required = false): string | undefined {
   const index = args.indexOf(name); const value = index >= 0 ? args[index + 1] : undefined;
@@ -68,6 +69,50 @@ export function parseServeArgs(args: string[]): {
   return { useDiscovery, configPath, workspace, python, runtimeDir };
 }
 
+export interface DiscoveryServerDependencies {
+  discover: typeof discoverWorkspace;
+  generate: typeof generateOdooConfig;
+  load: typeof loadConfig;
+}
+
+const discoveryServerDefaults: DiscoveryServerDependencies = { discover: discoverWorkspace, generate: generateOdooConfig, load: loadConfig };
+
+export async function prepareDiscoveryServer(
+  workspace: string,
+  python?: string,
+  runtimeDir?: string,
+  dependencies: DiscoveryServerDependencies = discoveryServerDefaults,
+): Promise<{ server: OdooLsMcpServer | DiagnosticMcpServer; cleanup?: () => Promise<void> }> {
+  let discovered: DiscoveredOdooWorkspace;
+  try {
+    discovered = await dependencies.discover(workspace, python, runtimeDir);
+  } catch (error) {
+    return diagnosticPreparation(error, "filesystem");
+  }
+
+  let generated: GeneratedOdooConfig;
+  try {
+    generated = await dependencies.generate(discovered, runtimeDir);
+  } catch (error) {
+    const source = error instanceof GeneratedConfigError && error.stage === "temporary-config" ? "generated-config" : "runtime";
+    return diagnosticPreparation(error, source);
+  }
+
+  try {
+    const config = await dependencies.load(generated.adapter);
+    return { server: new OdooLsMcpServer(config, discovered.discovery), cleanup: generated.cleanup };
+  } catch (error) {
+    await generated.cleanup().catch(() => process.stderr.write("[odools-mcp] temporary discovery cleanup failed safely\n"));
+    return diagnosticPreparation(error, "generated-config");
+  }
+}
+
+function diagnosticPreparation(error: unknown, source: "filesystem" | "runtime" | "generated-config") {
+  const diagnostic = createDiscoveryDiagnostic(error, source);
+  process.stderr.write(`[odools-mcp] ${safeDiscoverySummary(diagnostic)}\n`);
+  return { server: new DiagnosticMcpServer(diagnostic) };
+}
+
 async function serve(args: string[]): Promise<void> {
   const lifecycle = new LifecycleCoordinator();
   let cleanupTemp: (() => Promise<void>) | undefined;
@@ -77,7 +122,7 @@ async function serve(args: string[]): Promise<void> {
   const doCleanup = async () => {
     if (cleanupTemp && !cleaned) {
       cleaned = true; // idempotent shared cleanup
-      await cleanupTemp().catch((e) => process.stderr.write(`odools-mcp cleanup: ${String(e)}\n`));
+      await cleanupTemp().catch(() => process.stderr.write("[odools-mcp] temporary discovery cleanup failed safely\n"));
     }
   };
 
@@ -92,23 +137,20 @@ async function serve(args: string[]): Promise<void> {
   const parsed = parseServeArgs(args);
 
   try {
-    let config: any;
+    let server: OdooLsMcpServer | DiagnosticMcpServer;
     if (parsed.configPath) {
       // Preserve serve --config <adapter.json> unchanged (AC contract)
       const raw = JSON.parse(await readFile(resolve(parsed.configPath), "utf8")) as unknown;
-      config = await loadConfig(raw);
+      server = new OdooLsMcpServer(await loadConfig(raw));
     } else {
-      // Discovery mode - AC-DISC-01 to AC-DISC-05
-      const ws = parsed.workspace || process.cwd();
-      const discovered = await discoverWorkspace(ws, parsed.python, parsed.runtimeDir);
-      const generated: GeneratedOdooConfig = await generateOdooConfig(discovered, parsed.runtimeDir);
-      cleanupTemp = generated.cleanup; // capture ownership before any later operation can fail
+      const prepared = await prepareDiscoveryServer(parsed.workspace || process.cwd(), parsed.python, parsed.runtimeDir);
+      server = prepared.server;
+      cleanupTemp = prepared.cleanup;
       if (stopRequested) { await doCleanup(); return; }
-      config = await loadConfig(generated.adapter);
     }
-    await lifecycle.start(new OdooLsMcpServer(config));
+    await lifecycle.start(server);
   } catch (error) {
-    await doCleanup(); // startup failures clean immediately
+    await doCleanup();
     throw error;
   }
 }

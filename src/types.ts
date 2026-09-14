@@ -30,13 +30,47 @@ export interface ReadinessSnapshot {
   maxWatcherDocuments: number;
 }
 
+export interface StructuredDiagnosticError {
+  code: string;
+  message: string;
+  recoverable: boolean;
+  retryAfterRestart: boolean;
+  details: string[];
+  actions: string[];
+}
+
+export type DiscoveryFailureSource = "filesystem" | "runtime" | "generated-config";
+
+export interface DiscoveryDiagnostic {
+  mode: "discover-workspace";
+  status: "failed";
+  source: DiscoveryFailureSource;
+  error: StructuredDiagnosticError;
+}
+
+export interface DiscoveryMetadata {
+  mode: "conventional" | "doodba-reconciled";
+  source: "filesystem" | "addons.yaml+odoo/auto/odoo.conf";
+  status: "ready";
+  effectiveModuleCount?: number;
+  effectiveRootCount?: number;
+  shadowedDuplicateCount?: number;
+  inactiveExposedCount?: number;
+  unknownConditionResolvedCount?: number;
+  generatedFingerprint?: string;
+  warnings?: string[];
+  warningsTruncated?: boolean;
+}
+
 export interface DiscoveredOdooWorkspace {
   /** Authoritative workspace root (for Doodba: exactly <doodba-root>/odoo/custom/src) */
   workspace: string;
   /** Canonical path to Odoo core (odoo-bin + base manifest) */
   odooPath: string;
-  /** Canonical, deduplicated, sorted immediate-child addon roots inside workspace */
+  /** Canonical addon roots in OdooLS first-wins precedence order. */
   addonRoots: string[];
+  /** Bounded additive discovery diagnostics for status reporting. */
+  discovery?: DiscoveryMetadata;
   /** Whether this is a validated Doodba structure */
   isDoodba: boolean;
   /** Resolved Python executable (CLI > .venv > python3) */

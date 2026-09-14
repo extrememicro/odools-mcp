@@ -18,7 +18,7 @@ const serveArgs = serveArguments.length ? serveArguments : parseServeArgs(proces
 if (!executable || !fixturePath || !serveArgs.length) throw new Error("Usage: process-smoke.mjs EXECUTABLE FIXTURE.json SERVE_ARGS... (or corresponding ODOOLS_PROCESS_SMOKE_* env vars)");
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 for (const key of ["definition", "references"]) if (!fixture[key]?.path || !fixture[key]?.line || !fixture[key]?.column) throw new Error(`Fixture requires ${key} path, line and column`);
-const expected = ["odools_declaration", "odools_definition", "odools_references", "odools_status"];
+const expected = ["declaration", "definition", "references", "status"];
 function optionValue(name) {
   const positions = serveArgs.flatMap((value, index) => value === name ? [index] : []);
   if (positions.length > 1) throw new Error(`Duplicate process-smoke serve argument: ${name}`);
@@ -109,14 +109,14 @@ async function normalSmoke() {
     if (dormantEntries.some((entry) => entry.startsWith("odools-session-"))) throw new Error("Dormant adapter created an OdooLS session directory");
     const listed = (await client.listTools()).tools.map(({ name }) => name).sort();
     if (JSON.stringify(listed) !== JSON.stringify(expected)) throw new Error(`Unexpected tools: ${listed.join(",")}`);
-    const status = (await client.callTool({ name: "odools_status", arguments: {} })).structuredContent;
+    const status = (await client.callTool({ name: "status", arguments: {} })).structuredContent;
     if (status?.state !== "dormant" || status.processAlive || status.watcherDocumentCount !== 0) throw new Error(`Runtime was not dormant: ${JSON.stringify(status)}`);
     if ((await sampleDescendants(pid)).length) throw new Error("Status activated a child process");
-    for (const name of ["odools_definition", "odools_references"]) {
-      const result = (await client.callTool({ name, arguments: fixture[name.slice(7)] }, undefined, { timeout: 180_000 })).structuredContent;
+    for (const name of ["definition", "references"]) {
+      const result = (await client.callTool({ name, arguments: fixture[name] }, undefined, { timeout: 180_000 })).structuredContent;
       if (result?.error || !Number.isInteger(result?.returned)) throw new Error(`${name} failed: ${JSON.stringify(result)}`);
-      if (name === "odools_definition" && result.returned < 1) throw new Error("Definition returned no locations");
-      if (name === "odools_definition") {
+      if (name === "definition" && result.returned < 1) throw new Error("Definition returned no locations");
+      if (name === "definition") {
         children = await sampleDescendants(pid);
         if (!children.length) throw new Error("Semantic call did not activate OdooLS");
         const activeEntries = await configSnapshot();

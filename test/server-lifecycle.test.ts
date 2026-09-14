@@ -38,18 +38,18 @@ describe("MCP/LSP lifecycle composition", () => {
     const recordFile = join(await mkdtemp(join(tmpdir(), "odools-spawns-")), "spawns.jsonl"); process.env.FAKE_LSP_RECORD_FILE = recordFile;
     const server = await makeServer({ quietMs: 100 }); const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test", version: "1" }); await Promise.all([server.start(serverTransport), client.connect(clientTransport)]);
-    expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["odools_declaration", "odools_definition", "odools_references", "odools_status"]);
+    expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["declaration", "definition", "references", "status"]);
     for (let index = 0; index < 2; index++) {
-      const status = await client.callTool({ name: "odools_status", arguments: {} });
+      const status = await client.callTool({ name: "status", arguments: {} });
       expect(status.structuredContent).toMatchObject({ state: "dormant", processAlive: false, watcherState: "stopped", watcherDocumentCount: 0, activationPolicy: "on-semantic-tool" });
       expect(server.lsp.lastChildPid).toBeUndefined();
     }
     const path = "model.py"; await writeFile(join(server.lsp.config.workspace, path), "value = 1\n");
-    const calls = ["odools_definition", "odools_references", "odools_declaration"].map((name) => client.callTool({ name, arguments: { path, line: 1, column: 1 } }));
+    const calls = ["definition", "references", "declaration"].map((name) => client.callTool({ name, arguments: { path, line: 1, column: 1 } }));
     const results = await Promise.all(calls); expect(results.every((result) => result.isError !== true), JSON.stringify(results)).toBe(true);
     expect(results.map((result) => result.structuredContent)).toEqual(results.map(() => expect.objectContaining({ coldStart: true, startupDurationMs: expect.any(Number) })));
     expect(await spawnPids(recordFile)).toHaveLength(1);
-    const warm = await client.callTool({ name: "odools_definition", arguments: { path, line: 1, column: 1 } });
+    const warm = await client.callTool({ name: "definition", arguments: { path, line: 1, column: 1 } });
     expect(warm.structuredContent).toMatchObject({ coldStart: false }); expect(warm.structuredContent).not.toHaveProperty("startupDurationMs");
     expect(await spawnPids(recordFile)).toHaveLength(1);
     expect(server.lsp.childPid).toBeTypeOf("number"); expect(server.lsp.readiness.snapshot()).toMatchObject({ watcherState: "watching", automaticRestart: true });

@@ -8,7 +8,7 @@ Thank you for improving `odools-mcp`, an independent adapter maintained by **Ext
 - Discuss substantial behavior, protocol, dependency, runtime-pin, discovery, lifecycle, or threat-model changes in an issue before implementation.
 - Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 - Keep the adapter independent: do not vendor, embed, fork, or patch OdooLS in this repository. Propose a fork only for an actual upstream fix, preferably with an upstream contribution path.
-- Preserve the public boundary of four read-only tools unless a separately reviewed release decision changes it.
+- Preserve the public boundary of exactly four read-only MCP leaves—`status`, `definition`, `declaration`, and `references`—unless a separately reviewed release decision changes it.
 - Do not add credentials, customer/private source, local absolute paths, runtime archives, generated packages, logs, private benchmark corpora, or agent artifacts.
 - Keep the package private and GitHub-only unless maintainers make a separate distribution decision; do not prepare or perform npm publication.
 
@@ -46,7 +46,8 @@ Changes should preserve these public properties unless an approved design explic
 
 - official, unmodified OdooLS 1.5.2 Beta and TypeScript/tsserver 6.0.2 in the managed Linux x64 runtime;
 - dormant MCP connection, shared activation on the first semantic call, warm reuse, and bounded post-activation watching/restart;
-- `odools_status` remaining non-activating;
+- raw `status` remaining non-activating;
+- direct raw-MCP callers migrating from the pre-release `odools_*` leaf names to `status`, `definition`, `declaration`, and `references`; the configured MCP server name `odools` does not change;
 - native conservative discovery remaining fail-closed and free of Git, Docker, network, or project-code execution;
 - explicit configuration remaining available independently of any editor-specific activation plugin;
 - workspace-relative inputs, rooted output paths, and one-based Unicode code-point public positions;
