@@ -1,4 +1,5 @@
 import chokidar, { type FSWatcher } from "chokidar";
+import { pathToFileURL } from "node:url";
 import { lstat } from "node:fs/promises";
 import { basename, extname, relative, sep } from "node:path";
 import type { PathGuard, SafeFile } from "../security/path-guard.js";
@@ -26,26 +27,28 @@ export class SourceWatcher {
   private pending = new Map<string, "content" | "delete">();
   private knownFiles = new Map<string, string>();
   private ready = false;
+  private cancelStart?: () => void;
   private flushChain = Promise.resolve();
   private generation = 0;
+  private delivery = new AbortController();
 
   constructor(
     private readonly roots: string[],
     private readonly guard: PathGuard,
     private readonly debounceMs: number,
-    private readonly onChanges: (changes: WatchedFileChange[]) => void | Promise<void>,
+    private readonly onChanges: (changes: WatchedFileChange[], signal: AbortSignal) => void | Promise<void>,
     private readonly onError: (error: Error) => void,
   ) {}
 
   async start(): Promise<void> {
     if (this.watcher) return;
     const generation = ++this.generation;
+    this.delivery = new AbortController();
     this.watcher = chokidar.watch(this.roots, {
       persistent: true,
-      ignoreInitial: true,
+      ignoreInitial: false,
       followSymlinks: false,
-      usePolling: true,
-      interval: Math.min(100, this.debounceMs),
+      usePolling: false,
       awaitWriteFinish: { stabilityThreshold: this.debounceMs, pollInterval: Math.min(50, this.debounceMs) },
       ignored: (path, stats) => {
         if (stats?.isSymbolicLink()) return true;
@@ -54,56 +57,59 @@ export class SourceWatcher {
         return stats?.isFile() === true && !relevant(path);
       },
     });
-    this.watcher.on("add", (path) => { if (this.ready) void this.accept(path, "content"); });
+    // Initial discovery records names only. Content is confined and read only on changes.
+    this.watcher.on("add", (path) => {
+      if (this.ready) void this.accept(path, "content");
+      else if (this.roots.some((root) => within(root, path)) && relevant(path)) this.knownFiles.set(path, pathToFileURL(path).href);
+    });
     this.watcher.on("change", (path) => void this.accept(path, "content"));
     this.watcher.on("unlink", (path) => { if (this.knownFiles.has(path)) void this.accept(path, "delete"); });
     await new Promise<void>((resolve, reject) => {
-      this.watcher!.once("ready", async () => {
-        try {
-          for (const [directory, entries] of Object.entries(this.watcher!.getWatched())) {
-            for (const entry of entries) {
-              const path = `${directory}${sep}${entry}`;
-              if (relevant(path)) await this.validate(path);
-            }
-          }
-          if (generation === this.generation) this.ready = true;
-          resolve();
-        } catch (error) { reject(error); }
+      this.cancelStart = () => reject(new Error("watcher startup cancelled"));
+      this.watcher!.once("ready", () => {
+        if (generation !== this.generation) return;
+        this.ready = true;
+        this.cancelStart = undefined;
+        resolve();
       });
-      this.watcher!.once("error", reject);
+      this.watcher!.on("error", (error) => { reject(error); if (generation === this.generation) this.report(error); });
     });
-    this.watcher.on("error", (error) => this.report(error));
   }
 
   async close(): Promise<void> {
     ++this.generation;
+    this.delivery.abort();
+    this.cancelStart?.(); this.cancelStart = undefined;
     this.ready = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = undefined;
     this.pending.clear();
     const watcher = this.watcher;
     this.watcher = undefined;
-    if (watcher) await watcher.close();
-    await this.flushChain;
     this.knownFiles.clear();
+    if (watcher) await watcher.close();
+    // In-flight secure reads cannot be cancelled; generation checks discard their results.
   }
 
   private async validate(path: string): Promise<SafeFile | undefined> {
+    const generation = this.generation;
     try {
       if ((await lstat(path)).isSymbolicLink()) throw new Error("symbolic links are not watchable");
       const file = await this.guard.watched(path);
+      if (generation !== this.generation) return undefined;
       this.knownFiles.set(path, file.uri);
       return file;
-    } catch { this.knownFiles.delete(path); return undefined; }
+    } catch { if (generation === this.generation) this.knownFiles.delete(path); return undefined; }
   }
 
   private async accept(path: string, kind: "content" | "delete"): Promise<void> {
-    if (!this.roots.some((root) => within(root, path)) || !relevant(path)) return;
+    const generation = this.generation;
+    if (!this.watcher || !this.roots.some((root) => within(root, path)) || !relevant(path)) return;
     if (kind === "delete" && !this.knownFiles.has(path)) return;
     if (kind === "content" && !await this.validate(path)) return;
+    if (generation !== this.generation) return;
     this.pending.set(path, kind);
     if (this.timer) clearTimeout(this.timer);
-    const generation = this.generation;
     this.timer = setTimeout(() => this.enqueueFlush(generation), this.debounceMs);
   }
 
@@ -125,8 +131,8 @@ export class SourceWatcher {
           if (file) changes.push({ kind, file });
         }
       }
-      if (changes.length && generation === this.generation) await this.onChanges(changes);
-    }).catch((error) => this.report(error));
+      if (changes.length && generation === this.generation) await this.onChanges(changes, this.delivery.signal);
+    }).catch((error) => { if (generation === this.generation) this.report(error); });
   }
 
   private report(error: unknown): void {

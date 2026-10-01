@@ -12,6 +12,9 @@ import { encodeFrame, LspFrameParser } from "./framing.js";
 import { ReadinessTracker } from "./readiness.js";
 import { SourceWatcher, type WatchedFileChange } from "./watcher.js";
 
+// Startup failure settlement allows at most 500ms for cleanup; disposal continues in the background.
+const CLEANUP_GRACE_MS = 500;
+
 interface Pending { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout; abortCleanup?: () => void }
 interface RpcMessage { jsonrpc?: string; id?: JsonRpcId; method?: string; params?: any; result?: unknown; error?: { code?: number; message?: string } }
 interface Document { path: string; version: number; text: string; languageId: string }
@@ -37,6 +40,8 @@ export class LspSession extends EventEmitter {
   private activationPromise?: Promise<void>;
   private activationAbortController?: AbortController;
   private permanentlyStopped = false;
+  private cleanupTasks = new Set<Promise<void>>();
+  private cleanupDelayed = false;
   private abortWaiters = new WeakMap<AbortSignal, { callbacks: Set<() => void>; listener: () => void }>();
   private logsDirectory?: string;
   private ownedOperationalDirectory?: string;
@@ -64,7 +69,8 @@ export class LspSession extends EventEmitter {
   async ensureStarted(signal?: AbortSignal): Promise<{ coldStart: boolean; startupDurationMs?: number }> {
     if (signal?.aborted) throw new Error("cancelled");
     if (this.permanentlyStopped) throw new Error("ODOOLS_START_FAILED: OdooLS session is stopped");
-    if (this.child && this.initialized && !this.restartLoop) return { coldStart: false };
+    if (this.cleanupTasks.size) throw new Error("ODOOLS_START_FAILED: prior resource cleanup is still pending; retry after cleanup completes");
+    if (this.child && this.initialized && !this.restartLoop && !this.activationPromise) return { coldStart: false };
     const waitedForRestart = Boolean(this.restartLoop);
     const coldStart = !waitedForRestart;
     const startedAt = Date.now();
@@ -86,25 +92,38 @@ export class LspSession extends EventEmitter {
   }
 
   private async activate(): Promise<void> {
-    this.activationAbortController = new AbortController();
+    const controller = new AbortController();
+    this.activationAbortController = controller;
+    let stage = "input validation";
+    const timer = setTimeout(() => controller.abort(new Error(`ODOOLS_READINESS_TIMEOUT: startup timed out after ${this.config.startupTimeoutMs}ms during ${stage}; inspect backend logs and watcher roots or increase startupTimeoutMs`)), this.config.startupTimeoutMs);
     this.readiness.setLifecycleState("activating");
     try {
-      await this.revalidateActivationInputs();
-      if (this.activationAbortController.signal.aborted) throw new Error("cancelled");
-      this.stopping = false;
-      await this.startProcess();
-      await this.waitUntilReady(this.config.startupTimeoutMs, this.activationAbortController.signal);
-      await this.startWatcher(); this.readiness.clearRecoveryState();
+      await this.waitForCaller((async () => {
+        await this.revalidateActivationInputs(controller.signal);
+        controller.signal.throwIfAborted();
+        this.stopping = false;
+        stage = "initialize";
+        await this.startProcess(controller.signal);
+        controller.signal.throwIfAborted();
+        stage = "backend readiness";
+        await this.waitUntilReady(this.config.startupTimeoutMs, controller.signal);
+        controller.signal.throwIfAborted();
+        stage = "watcher setup";
+        await this.startWatcher();
+        controller.signal.throwIfAborted();
+        this.readiness.clearRecoveryState();
+      })(), controller.signal);
     } catch (error) {
-      await this.stopInternal(false);
-      const message = error instanceof Error ? error.message : String(error);
-      if (/^(RUNTIME_MISSING|RUNTIME_INVALID|WORKSPACE_CHANGED|GENERATED_CONFIG_INVALID|ODOOLS_START_FAILED|ODOOLS_READINESS_TIMEOUT):/.test(message)) throw error;
+      await this.settleCleanup(this.stopInternal(false), "activation cleanup");
+      const failure = controller.signal.aborted && controller.signal.reason instanceof Error ? controller.signal.reason : error;
+      const message = failure instanceof Error ? failure.message : String(failure);
+      if (/^(RUNTIME_MISSING|RUNTIME_INVALID|WORKSPACE_CHANGED|GENERATED_CONFIG_INVALID|ODOOLS_START_FAILED|ODOOLS_READINESS_TIMEOUT):/.test(message)) throw failure;
       if (/timed out/i.test(message)) throw new Error(`ODOOLS_READINESS_TIMEOUT: ${message}`);
       throw new Error(`ODOOLS_START_FAILED: ${message}`);
-    }
+    } finally { clearTimeout(timer); }
   }
 
-  private async revalidateActivationInputs(): Promise<void> {
+  private async revalidateActivationInputs(signal?: AbortSignal): Promise<void> {
     const check = async (path: string, code: string, mode?: number) => {
       try { const canonical = await realpath(path); if (canonical !== path) throw new Error("canonical path changed"); if (mode !== undefined) await access(path, mode); }
       catch (error) { throw new Error(`${code}: ${error instanceof Error ? error.message : String(error)}`); }
@@ -112,7 +131,7 @@ export class LspSession extends EventEmitter {
     await check(this.config.workspace, "WORKSPACE_CHANGED");
     await check(this.config.binary, "RUNTIME_MISSING", constants.X_OK);
     try {
-      const version = await commandOutput(this.config.binary, ["--version"]);
+      const version = await commandOutput(this.config.binary, ["--version"], signal);
       if (!version.includes(ENGINE_VERSION)) throw new Error(`expected ${ENGINE_VERSION}, got ${version.trim()}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -175,9 +194,13 @@ export class LspSession extends EventEmitter {
     return this.logsDirectory;
   }
 
-  private async startProcess(): Promise<void> {
+  private async startProcess(signal?: AbortSignal): Promise<void> {
     if (this.child) throw new Error("refusing to overwrite a live OdooLS child");
     const logsDirectory = await this.ensureLogsDirectory();
+    if (signal?.aborted || this.permanentlyStopped) {
+      if (this.ownedOperationalDirectory) { await rm(this.ownedOperationalDirectory, { recursive: true, force: true }); this.ownedOperationalDirectory = undefined; this.logsDirectory = undefined; }
+      throw new Error("OdooLS startup cancelled");
+    }
     this.parser = new LspFrameParser(); this.stderrBytes = 0; this.initialized = false;
     const child = spawn(this.config.binary, ["--config-path", this.config.config, "--selected-config", this.config.profile, "--logs-directory", logsDirectory], { cwd: this.config.workspace, env: childEnvironment(this.config), stdio: ["pipe", "pipe", "pipe"] });
     this.child = child; this.lastPid = child.pid; this.readiness.setAlive(true);
@@ -197,6 +220,30 @@ export class LspSession extends EventEmitter {
 
   async stop(): Promise<void> { this.permanentlyStopped = true; await this.stopInternal(true); }
 
+  private async settleCleanup(cleanup: Promise<void>, label: string): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const report = (detail: string) => {
+      this.cleanupDelayed = true;
+      this.readiness.setRecovery({ lastError: `${label}: ${detail}; disposal continues in background; retry after cleanup completes` });
+    };
+    const observed = cleanup.catch((error) => {
+      this.permanentlyStopped = true;
+      report(`cleanup failed: ${this.safeError(error)}`);
+    }).finally(() => {
+      this.cleanupTasks.delete(observed);
+      if (!this.cleanupTasks.size && this.cleanupDelayed && !this.permanentlyStopped) {
+        this.cleanupDelayed = false;
+        this.readiness.setRecovery({ lastError: null });
+      }
+    });
+    this.cleanupTasks.add(observed);
+    try {
+      await Promise.race([observed, new Promise<void>((resolve) => {
+        timer = setTimeout(() => { report(`cleanup exceeded ${CLEANUP_GRACE_MS}ms grace`); resolve(); }, CLEANUP_GRACE_MS);
+      })]);
+    } finally { if (timer) clearTimeout(timer); }
+  }
+
   private async stopInternal(cancelActivation: boolean): Promise<void> {
     if (cancelActivation) this.activationAbortController?.abort();
     if (this.stopping && !this.child && !this.restartLoop) {
@@ -204,20 +251,23 @@ export class LspSession extends EventEmitter {
     }
     this.readiness.setLifecycleState("stopping");
     this.stopping = true; this.restartAbortController?.abort();
-    if (this.watcher) { await this.watcher.close(); this.watcher = undefined; }
-    if (this.restartLoop) await this.restartLoop;
+    const watcher = this.watcher; this.watcher = undefined;
+    const watcherCleanup = watcher ? this.settleCleanup(watcher.close(), "watcher cleanup") : Promise.resolve();
+    if (this.restartLoop) await this.settleCleanup(this.restartLoop, "restart cleanup");
     this.readiness.setRecovery({ watcherDocumentCount: 0, watcherState: this.config.watcherEnabled ? "stopped" : "disabled" });
     if (this.child) {
       try { if (this.initialized) await this.request("shutdown", null, Math.min(this.config.requestTimeoutMs, 200)); } catch { /* force cleanup */ }
       try { this.notify("exit"); } finally { await this.disposeChild(); }
     }
     this.rejectAll(new Error("OdooLS session stopped")); this.documents.clear(); this.watcherDocuments.clear(); this.updateWatcherCount(); this.readiness.setAlive(false);
+    await watcherCleanup;
     if (this.ownedOperationalDirectory) { await rm(this.ownedOperationalDirectory, { recursive: true, force: true }); this.ownedOperationalDirectory = undefined; this.logsDirectory = undefined; }
     this.readiness.setLifecycleState(this.permanentlyStopped ? "stopped" : "dormant");
   }
 
-  async open(uri: string, path: string, text?: string): Promise<void> {
+  async open(uri: string, path: string, text?: string, isCurrent: () => boolean = () => true): Promise<void> {
     const existing = this.documents.get(uri); const current = text ?? await readFile(path, "utf8");
+    if (!isCurrent()) return;
     if (!existing) {
       const document = { path, version: 1, text: current, languageId: language(path) }; this.documents.set(uri, document);
       this.notify("textDocument/didOpen", { textDocument: { uri, languageId: document.languageId, version: document.version, text: current } });
@@ -263,14 +313,16 @@ export class LspSession extends EventEmitter {
   }
 
   private onUnexpectedExit(error: Error): void {
-    if (this.stopping || this.restartLoop) return;
+    if (this.stopping || this.restartLoop || this.activationPromise) return;
     this.rejectAll(new Error(`OdooLS crashed: ${this.safeError(error)}`));
     this.readiness.setRecovery({ lastCrash: this.safeError(error) });
     const now = Date.now(); this.restartTimes = this.restartTimes.filter((time) => now - time <= this.config.restartWindowMs);
     this.restartLoop = this.recover().finally(() => { this.restartLoop = undefined; });
   }
   private async recover(): Promise<void> {
-    if (this.watcher) { await this.watcher.close(); this.watcher = undefined; }
+    const watcher = this.watcher; this.watcher = undefined;
+    if (watcher) await this.settleCleanup(watcher.close(), "recovery watcher cleanup");
+    if (this.stopping || this.permanentlyStopped || this.cleanupTasks.size) return;
     this.readiness.setRecovery({ watcherDocumentCount: 0, watcherState: this.config.watcherEnabled ? "stopped" : "disabled" });
     const now = Date.now();
     if (this.restartTimes.length >= this.config.restartMaxAttempts) { this.readiness.setRecovery({ lastError: "automatic restart budget exhausted" }, "failed"); return; }
@@ -280,7 +332,7 @@ export class LspSession extends EventEmitter {
     try {
       await abortableDelay(this.config.restartBackoffMs, this.restartAbortController.signal);
       if (this.stopping) return;
-      await this.startProcess();
+      await this.startProcess(this.restartAbortController.signal);
       await this.waitUntilReady(this.config.startupTimeoutMs, this.restartAbortController.signal);
       await this.startWatcher(); this.readiness.clearRecoveryState();
     } catch (error) {
@@ -291,20 +343,21 @@ export class LspSession extends EventEmitter {
   private async startWatcher(): Promise<void> {
     if (!this.config.watcherEnabled || this.watcher || this.stopping) return;
     this.readiness.setRecovery({ watcherState: "starting", watcherError: null });
-    const watcher = new SourceWatcher(
+    const watcher: SourceWatcher = new SourceWatcher(
       this.config.allowedRoots,
       this.config.guard,
       this.config.watcherDebounceMs,
-      async (changes) => this.forwardWatchedChanges(changes),
-      (error) => this.readiness.setRecovery({ watcherState: "failed", watcherError: this.safeError(error) }),
+      async (changes, signal) => this.forwardWatchedChanges(changes, () => !signal.aborted && !this.stopping && this.watcher === watcher),
+      (error) => { if (!this.stopping && this.watcher === watcher) this.readiness.setRecovery({ watcherState: "failed", watcherError: this.safeError(error) }); },
     );
     this.watcher = watcher;
-    try { await watcher.start(); this.readiness.setRecovery({ watcherState: "watching" }); }
-    catch (error) { this.readiness.setRecovery({ watcherState: "failed", watcherError: this.safeError(error) }); await watcher.close(); if (this.watcher === watcher) this.watcher = undefined; }
+    try { await watcher.start(); if (!this.stopping && this.watcher === watcher) this.readiness.setRecovery({ watcherState: "watching" }); }
+    catch (error) { if (!this.stopping && this.watcher === watcher) this.readiness.setRecovery({ watcherState: "failed", watcherError: this.safeError(error) }); if (this.watcher === watcher) this.watcher = undefined; await this.settleCleanup(watcher.close(), "watcher startup cleanup"); }
   }
 
-  private async forwardWatchedChanges(changes: WatchedFileChange[]): Promise<void> {
+  private async forwardWatchedChanges(changes: WatchedFileChange[], isCurrent: () => boolean): Promise<void> {
     for (const change of changes) {
+      if (!isCurrent()) return;
       if (change.kind === "delete") {
         if (this.documents.has(change.uri)) this.notify("textDocument/didClose", { textDocument: { uri: change.uri } });
         this.documents.delete(change.uri); this.watcherDocuments.delete(change.uri);
@@ -313,10 +366,11 @@ export class LspSession extends EventEmitter {
       }
       const { file } = change;
       const watcherManaged = !this.documents.has(file.uri) || this.watcherDocuments.has(file.uri);
-      await this.open(file.uri, file.absolutePath, file.text);
+      await this.open(file.uri, file.absolutePath, file.text, isCurrent);
+      if (!isCurrent()) return;
       if (watcherManaged) this.touchWatcherDocument(file.uri);
     }
-    this.updateWatcherCount();
+    if (isCurrent()) this.updateWatcherCount();
   }
   private touchWatcherDocument(uri: string): void {
     this.watcherDocuments.delete(uri); this.watcherDocuments.set(uri, true);

@@ -32,16 +32,19 @@ const schema = z.object({
 });
 export type AdapterConfig = Omit<z.infer<typeof schema>, "binary"> & { binary: string; guard: PathGuard; tsserverPath?: string };
 
-export async function commandOutput(command: string, args: string[]): Promise<string> {
+export async function commandOutput(command: string, args: string[], signal?: AbortSignal): Promise<string> {
   return await new Promise((resolvePromise, reject) => {
+    if (signal?.aborted) { reject(new Error("cancelled")); return; }
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
     let output = ""; let settled = false;
     const finish = (error?: Error) => {
-      if (settled) return; settled = true; clearTimeout(timer);
+      if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort);
       if (error) reject(error);
       else resolvePromise(output.trim());
     };
     const timer = setTimeout(() => { child.kill("SIGKILL"); finish(new Error(`${command} version check timed out`)); }, 5_000);
+    const abort = () => { child.kill("SIGKILL"); finish(new Error("cancelled")); };
+    signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk) => { if (output.length < 16_384) output += String(chunk).slice(0, 16_384 - output.length); });
     child.stderr.on("data", (chunk) => { if (output.length < 16_384) output += String(chunk).slice(0, 16_384 - output.length); });
     child.once("error", (error) => finish(error));

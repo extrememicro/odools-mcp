@@ -2,7 +2,7 @@ import { chmod, copyFile, lstat, mkdtemp, mkdir, readFile, realpath, rename, rm,
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { LspSession } from "../src/lsp/session.js";
 import { SourceWatcher } from "../src/lsp/watcher.js";
@@ -26,6 +26,152 @@ async function received(session: LspSession): Promise<any> { return await sessio
 function expectPidGone(pid: number): void { expect(() => process.kill(pid, 0)).toThrow(); }
 
 describe("LSP session", () => {
+  it("AC-01/03: includes stalled watcher setup in the shared startup deadline", async () => {
+    const startSpy = vi.spyOn(SourceWatcher.prototype, "start").mockImplementation(() => new Promise(() => undefined));
+    const closeSpy = vi.spyOn(SourceWatcher.prototype, "close");
+    const session = new LspSession(await fixture({ startupTimeoutMs: 1000 })); sessions.push(session);
+    try {
+      const started = Date.now();
+      const first = session.ensureStarted();
+      const assertion = expect(first).rejects.toThrow(/ODOOLS_READINESS_TIMEOUT:.*watcher setup/);
+      await waitFor(() => startSpy.mock.calls.length === 1);
+      await expect(session.ensureStarted()).rejects.toThrow(/ODOOLS_READINESS_TIMEOUT/);
+      await assertion;
+      expect(Date.now() - started).toBeLessThan(1500);
+      expect(closeSpy).toHaveBeenCalled();
+      expect(session.childPid).toBeUndefined(); expectPidGone(session.lastChildPid!);
+      expect(session.pendingCount).toBe(0);
+    } finally { startSpy.mockRestore(); closeSpy.mockRestore(); }
+  });
+
+  it("AC-01/03: caller cancellation is prompt without cancelling another startup waiter", async () => {
+    const session = new LspSession(await fixture()); sessions.push(session);
+    const controller = new AbortController();
+    const cancelled = session.ensureStarted(controller.signal);
+    const other = session.ensureStarted();
+    controller.abort();
+    await expect(cancelled).rejects.toThrow(/cancelled/);
+    await other;
+    expect(session.childPid).toBeDefined();
+  });
+
+  it("AC-01/03: stop interrupts stalled watcher startup and leaves no backend", async () => {
+    const spy = vi.spyOn(SourceWatcher.prototype, "start").mockImplementation(() => new Promise(() => undefined));
+    const session = new LspSession(await fixture()); sessions.push(session);
+    try {
+      const activation = expect(session.start()).rejects.toThrow();
+      await waitFor(() => spy.mock.calls.length === 1);
+      await session.stop(); await activation;
+      expect(session.childPid).toBeUndefined(); expectPidGone(session.lastChildPid!);
+    } finally { spy.mockRestore(); }
+  });
+
+  it("AC-02/03: initial inventory reads no file contents but tracks initial deletion and later edits", async () => {
+    const config = await fixture({ watcherDebounceMs: 20 });
+    const path = join(config.workspace, "initial.py");
+    await writeFile(path, "initial\n");
+    const reads = vi.spyOn(config.guard, "watched");
+    const batches: any[] = [];
+    const watcher = new SourceWatcher(config.allowedRoots, config.guard, 20, (changes) => { batches.push(...changes); }, () => undefined);
+    try {
+      await watcher.start(); expect(reads).not.toHaveBeenCalled();
+      await rm(path); await waitFor(() => batches.length === 1);
+      expect(batches[0]).toEqual({ kind: "delete", uri: pathToFileURL(path).href });
+      await writeFile(path, "changed\n"); await waitFor(() => batches.length === 2);
+      expect(batches[1].file.text).toBe("changed\n");
+      expect(reads).toHaveBeenCalled();
+    } finally { await watcher.close(); reads.mockRestore(); }
+  });
+
+  it("AC-03: closing a watcher settles startup even before discovery is ready", async () => {
+    const config = await fixture();
+    const watcher = new SourceWatcher(config.allowedRoots, config.guard, 20, () => undefined, () => undefined);
+    const starting = expect(watcher.start()).rejects.toThrow(/cancelled/);
+    await watcher.close(); await starting;
+  });
+
+  it("AC-03: close does not wait for a stalled secure read or deliver its late result", async () => {
+    const config = await fixture(); const path = join(config.workspace, "late.py");
+    let release!: () => void; let entered = false; let delivered = false;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const guard = await PathGuard.create(config.workspace, config.allowedRoots, {
+      afterOpen: async () => { entered = true; await gate; },
+    });
+    const watcher = new SourceWatcher(config.allowedRoots, guard, 20, () => { delivered = true; }, () => undefined);
+    try {
+      await watcher.start(); await writeFile(path, "late\n"); await waitFor(() => entered);
+      await watcher.close(); release();
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      expect(delivered).toBe(false);
+    } finally { release(); await watcher.close(); }
+  });
+
+  it("AC-01/03: stalled watcher close cannot exceed startup deadline plus 500ms cleanup grace", async () => {
+    const startSpy = vi.spyOn(SourceWatcher.prototype, "start").mockImplementation(() => new Promise(() => undefined));
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const closeSpy = vi.spyOn(SourceWatcher.prototype, "close").mockImplementation(() => gate);
+    const session = new LspSession(await fixture({ startupTimeoutMs: 1000 })); sessions.push(session);
+    try {
+      const started = Date.now();
+      await expect(session.ensureStarted()).rejects.toThrow(/ODOOLS_READINESS_TIMEOUT/);
+      // 200ms scheduler tolerance above the documented 1000 + 500ms bound.
+      expect(Date.now() - started).toBeLessThan(1700);
+      expect(session.readiness.snapshot().lastError).toMatch(/cleanup exceeded 500ms/);
+      expect(session.childPid).toBeUndefined(); expectPidGone(session.lastChildPid!);
+      expect(session.pendingCount).toBe(0);
+      await expect(session.ensureStarted()).rejects.toThrow(/cleanup is still pending/);
+      await new Promise((resolveWait) => setTimeout(resolveWait, 75));
+      release(); startSpy.mockRestore(); closeSpy.mockRestore();
+      await waitFor(() => session.readiness.snapshot().lastError === null);
+      await session.ensureStarted();
+      expect(session.childPid).toBeDefined();
+      expect(await session.request("textDocument/definition", {})).toBeDefined();
+    } finally { release(); startSpy.mockRestore(); closeSpy.mockRestore(); }
+  });
+
+  it("AC-01/03: stalled recovery watcher close does not hang stop or spawn a replacement", async () => {
+    const session = await start({ restartMaxAttempts: 1 });
+    const pid = session.childPid!;
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const originalClose = SourceWatcher.prototype.close;
+    const closeSpy = vi.spyOn(SourceWatcher.prototype, "close").mockImplementation(async function (this: SourceWatcher) {
+      await originalClose.call(this); await gate;
+    });
+    try {
+      await expect(session.request("test/crash", {}, 1000)).rejects.toThrow(/crashed/);
+      await waitFor(() => closeSpy.mock.calls.length > 0);
+      const started = Date.now(); await session.stop();
+      expect(Date.now() - started).toBeLessThan(800);
+      expect(session.childPid).toBeUndefined(); expectPidGone(pid);
+      release(); await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+      expect(session.lastChildPid).toBe(pid);
+      expect(session.readiness.snapshot().state).toBe("stopped");
+    } finally { release(); closeSpy.mockRestore(); }
+  });
+
+  it("AC-02/03: an entered multi-change dispatch cannot mutate a stopped session", async () => {
+    const session = await start({ watcherDebounceMs: 50 });
+    let release!: () => void;
+    const gate = new Promise<void>((resolveGate) => { release = resolveGate; });
+    const original = session.open.bind(session);
+    const openSpy = vi.spyOn(session, "open").mockImplementation(async (...args) => { await gate; await original(...args); });
+    const notify = vi.spyOn(session, "notify");
+    const recovery = vi.spyOn(session.readiness, "setRecovery");
+    try {
+      await Promise.all(["first.py", "second.py"].map((name) => writeFile(join(session.config.workspace, name), "value = 1\n")));
+      await waitFor(() => openSpy.mock.calls.length === 1);
+      await session.stop();
+      notify.mockClear(); recovery.mockClear();
+      release(); await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(notify).not.toHaveBeenCalled(); expect(recovery).not.toHaveBeenCalled();
+      expect(session.documentCount).toBe(0);
+      expect(session.readiness.snapshot()).toMatchObject({ watcherDocumentCount: 0, watcherState: "stopped" });
+    } finally { release(); openSpy.mockRestore(); notify.mockRestore(); recovery.mockRestore(); }
+  });
+
   it("keeps reporting ready for warm requests and returns to ready after real loading", async () => {
     const session = await start();
     expect(session.readiness.snapshot().state).toBe("ready");
