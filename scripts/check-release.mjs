@@ -144,8 +144,11 @@ const expectedFiles = [
   "dist/config.js",
   "dist/diagnostic.js",
   "dist/discovery.js",
+  "dist/file-diagnostics.js",
   "dist/generated-config.js",
+  "dist/hover.js",
   "dist/lifecycle.js",
+  "dist/lsp/diagnostics.js",
   "dist/lsp/framing.js",
   "dist/lsp/positions.js",
   "dist/lsp/readiness.js",
@@ -165,7 +168,7 @@ const expectedFiles = [
   "examples/opencode-v2.jsonc",
   "package.json",
 ].sort();
-if (expectedFiles.length !== 29) throw new Error(`Internal package manifest count is ${expectedFiles.length}, expected 29`);
+if (expectedFiles.length !== 32) throw new Error(`Internal package manifest count is ${expectedFiles.length}, expected 32`);
 if (JSON.stringify(files) !== JSON.stringify(expectedFiles)) throw new Error(`Unexpected package manifest:\n${JSON.stringify(files, null, 2)}`);
 const forbidden = /(^|\/)(node_modules|@tmp|test|tests|benchmark|benchmarks|corpus|\.git|@reports|@logs|@data|@exports)(\/|$)|\.(?:tgz|log)$/;
 const bad = files.filter((path) => forbidden.test(path));

@@ -27,8 +27,11 @@ export const SOURCE_ALLOWLIST = [
   "src/config.ts",
   "src/diagnostic.ts",
   "src/discovery.ts",
+  "src/file-diagnostics.ts",
   "src/generated-config.ts",
+  "src/hover.ts",
   "src/lifecycle.ts",
+  "src/lsp/diagnostics.ts",
   "src/lsp/framing.ts",
   "src/lsp/positions.ts",
   "src/lsp/readiness.ts",
@@ -46,22 +49,29 @@ export const SOURCE_ALLOWLIST = [
   "test/archive-security.test.ts",
   "test/core.test.ts",
   "test/diagnostic-server.test.ts",
+  "test/diagnostics-publication.integration.test.ts",
   "test/discovery.test.ts",
   "test/download.test.ts",
+  "test/file-diagnostics.test.ts",
   "test/fixtures/fake-lsp.mjs",
   "test/fixtures/probe.mjs",
   "test/fixtures/process-smoke.json",
+  "test/hover.test.ts",
   "test/lifecycle.test.ts",
   "test/process.test.ts",
+  "test/real-diagnostics.integration.test.ts",
   "test/real.integration.test.ts",
   "test/runtime.test.ts",
   "test/server-lifecycle.test.ts",
   "test/session.test.ts",
+  "test/xml-csv-diagnostics.integration.test.ts",
   "tsconfig.build.json",
   "tsconfig.json",
 ].sort();
 
 const GENERATED_DIRECTORIES = new Set([".git", ".nyc_output", "@tmp", "coverage", "dist", "node_modules"]);
+// Git-ignored local agent workspace (`/.agent/` in .gitignore); skipped only at the repository root.
+const ROOT_ONLY_IGNORED_DIRECTORIES = new Set([".agent"]);
 const MAX_TEXT_BYTES = 1024 * 1024;
 const PLACEHOLDER_VALUE = /^(?:<[^>]+>|\$\{[^}]+\}|\$[A-Z_][A-Z0-9_]*|example|placeholder|redacted|changeme|xxx+)$/i;
 
@@ -69,6 +79,7 @@ async function enumerateFiles(root, directory = root) {
   const result = [];
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     if (entry.isDirectory() && GENERATED_DIRECTORIES.has(entry.name)) continue;
+    if (entry.isDirectory() && directory === root && ROOT_ONLY_IGNORED_DIRECTORIES.has(entry.name)) continue;
     const absolute = join(directory, entry.name);
     if (entry.isDirectory()) result.push(...await enumerateFiles(root, absolute));
     else if (entry.isFile() || entry.isSymbolicLink()) result.push(relative(root, absolute).split(sep).join("/"));
@@ -142,6 +153,15 @@ async function negativeSelfTest() {
       if (!String(error).includes("unexpected-source.ts")) throw error;
     });
     await rm(join(fixture, "unexpected-source.ts"));
+    await mkdir(join(fixture, ".agent", "tmp"), { recursive: true });
+    await writeFile(join(fixture, ".agent", "tmp", "local.log"), "ignored local agent artifact\n");
+    await checkSourceHygiene(fixture);
+    await mkdir(join(fixture, "src", ".agent"), { recursive: true });
+    await writeFile(join(fixture, "src", ".agent", "nested.ts"), "export {};\n");
+    await checkSourceHygiene(fixture).then(() => { throw new Error("Nested .agent negative fixture unexpectedly passed"); }, (error) => {
+      if (!String(error).includes("src/.agent/nested.ts")) throw error;
+    });
+    await rm(join(fixture, "src", ".agent"), { recursive: true });
     await writeFile(join(fixture, "README.md"), `${"to" + "ken"} = "actual-secret-value"\n`);
     await checkSourceHygiene(fixture).then(() => { throw new Error("Content negative fixture unexpectedly passed"); }, (error) => {
       if (!String(error).includes("credential assignment")) throw error;
@@ -149,7 +169,7 @@ async function negativeSelfTest() {
   } finally {
     await rm(fixture, { recursive: true, force: true });
   }
-  process.stdout.write(`${JSON.stringify({ status: "source-hygiene-negative-tests-passed", cases: 2 })}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "source-hygiene-negative-tests-passed", cases: 4 })}\n`);
 }
 
 const invokedPath = process.argv[1] ? await realpath(process.argv[1]).catch(() => "") : "";

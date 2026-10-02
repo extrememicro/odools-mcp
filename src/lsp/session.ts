@@ -11,6 +11,7 @@ import { childEnvironment, commandOutput, ENGINE_VERSION } from "../config.js";
 import { encodeFrame, LspFrameParser } from "./framing.js";
 import { ReadinessTracker } from "./readiness.js";
 import { SourceWatcher, type WatchedFileChange } from "./watcher.js";
+import { DiagnosticsStore } from "./diagnostics.js";
 
 // Startup failure settlement allows at most 500ms for cleanup; disposal continues in the background.
 const CLEANUP_GRACE_MS = 500;
@@ -20,6 +21,7 @@ interface RpcMessage { jsonrpc?: string; id?: JsonRpcId; method?: string; params
 interface Document { path: string; version: number; text: string; languageId: string }
 
 export class LspSession extends EventEmitter {
+  readonly diagnostics: DiagnosticsStore;
   private child?: ChildProcessWithoutNullStreams;
   private nextId = 1;
   private pending = new Map<JsonRpcId, Pending>();
@@ -53,6 +55,7 @@ export class LspSession extends EventEmitter {
 
   constructor(readonly config: AdapterConfig) {
     super();
+    this.diagnostics = new DiagnosticsStore(config.guard.workspaceRoot);
     this.readiness = new ReadinessTracker(config.quietMs, Boolean(config.tsserverPath));
     this.readiness.setAlive(false);
     this.readiness.setRecovery({
@@ -204,9 +207,10 @@ export class LspSession extends EventEmitter {
     this.parser = new LspFrameParser(); this.stderrBytes = 0; this.initialized = false;
     const child = spawn(this.config.binary, ["--config-path", this.config.config, "--selected-config", this.config.profile, "--logs-directory", logsDirectory], { cwd: this.config.workspace, env: childEnvironment(this.config), stdio: ["pipe", "pipe", "pipe"] });
     this.child = child; this.lastPid = child.pid; this.readiness.setAlive(true);
-    child.stdout.on("data", (chunk: Buffer) => this.parser.push(chunk));
-    this.parser.on("message", (message) => this.handle(message as RpcMessage));
-    this.parser.on("error", (error) => { this.readiness.setRecovery({ lastError: this.safeError(error) }); void this.disposeChild(); });
+    const parser = this.parser;
+    child.stdout.on("data", (chunk: Buffer) => { if (this.child === child) parser.push(chunk); });
+    this.parser.on("message", (message) => { if (this.child === child) this.handle(message as RpcMessage); });
+    this.parser.on("error", (error) => { if (this.child === child) { this.readiness.setRecovery({ lastError: this.safeError(error) }); void this.disposeChild(); } });
     child.stderr.on("data", (chunk: Buffer) => { if (this.stderrBytes >= 64 * 1024) return; const text = chunk.subarray(0, 64 * 1024 - this.stderrBytes).toString(); this.stderrBytes += Buffer.byteLength(text); this.emit("stderr", text); });
     child.on("error", (error) => this.onUnexpectedExit(error));
     child.on("exit", (code, signal) => { if (this.child === child) { this.child = undefined; this.initialized = false; if (!this.stopping) this.onUnexpectedExit(new Error(`OdooLS exited (${String(code ?? signal)})`)); } });
@@ -214,7 +218,7 @@ export class LspSession extends EventEmitter {
       await this.request("initialize", { processId: process.pid, rootUri: pathToFileURL(this.config.workspace).href, capabilities: { workspace: { configuration: true } }, initializationOptions: { selectedProfile: this.config.profile } }, this.config.startupTimeoutMs);
       if (this.stopping || this.child !== child) throw new Error("OdooLS startup cancelled");
       this.notify("initialized", {}); this.initialized = true;
-      for (const [uri, document] of this.documents) this.notify("textDocument/didOpen", { textDocument: { uri, languageId: document.languageId, version: document.version, text: document.text } });
+      for (const [uri, document] of this.documents) { this.diagnostics.open(uri, document.version); this.notify("textDocument/didOpen", { textDocument: { uri, languageId: document.languageId, version: document.version, text: document.text } }); }
     } catch (error) { await this.disposeChild(); this.readiness.setAlive(false); throw error; }
   }
 
@@ -245,6 +249,7 @@ export class LspSession extends EventEmitter {
   }
 
   private async stopInternal(cancelActivation: boolean): Promise<void> {
+    this.diagnostics.clear();
     if (cancelActivation) this.activationAbortController?.abort();
     if (this.stopping && !this.child && !this.restartLoop) {
       this.readiness.setLifecycleState(this.permanentlyStopped ? "stopped" : "dormant"); return;
@@ -269,11 +274,13 @@ export class LspSession extends EventEmitter {
     const existing = this.documents.get(uri); const current = text ?? await readFile(path, "utf8");
     if (!isCurrent()) return;
     if (!existing) {
-      const document = { path, version: 1, text: current, languageId: language(path) }; this.documents.set(uri, document);
+      const document = { path, version: 1, text: current, languageId: language(path) }; this.documents.set(uri, document); this.diagnostics.open(uri, document.version);
       this.notify("textDocument/didOpen", { textDocument: { uri, languageId: document.languageId, version: document.version, text: current } });
     } else if (existing.text !== current) {
-      existing.version++; existing.text = current; existing.path = path;
+      existing.version++; existing.text = current; existing.path = path; this.diagnostics.open(uri, existing.version);
       this.notify("textDocument/didChange", { textDocument: { uri, version: existing.version }, contentChanges: [{ text: current }] });
+    } else if (this.diagnostics.snapshot(uri).documentVersion === null) {
+      this.diagnostics.open(uri, existing.version);
     }
   }
 
@@ -299,6 +306,7 @@ export class LspSession extends EventEmitter {
     if (message.method === "$/progress") { const kind = params?.value?.kind; const token = String(params?.token ?? ""); if (kind === "begin") this.readiness.progressBegin(token); if (kind === "end") this.readiness.progressEnd(token); }
     else if (message.method === "$Odoo/loadingStatusUpdate") this.readiness.setLoading(params !== false && params !== "stop");
     else if (message.method === "$Odoo/setConfiguration") this.readiness.setConfiguration(Array.isArray(params) ? params : params?.diagnostics ?? []);
+    else if (message.method === "textDocument/publishDiagnostics" && !this.stopping) this.diagnostics.publish(params);
     else if (message.method === "$/odoo/diagnostic_config") this.readiness.addConfigurationDiagnostics(Array.isArray(params) ? params : params?.diagnostics ?? [params]);
     else if (message.method === "$Odoo/javascriptReady") this.readiness.setJavascriptState("ready");
     else if (message.method === "$Odoo/javascriptUnavailable") this.readiness.setJavascriptState("unavailable", [String(params?.message ?? params ?? "JavaScript unavailable")]);
@@ -313,6 +321,7 @@ export class LspSession extends EventEmitter {
   }
 
   private onUnexpectedExit(error: Error): void {
+    this.diagnostics.clear();
     if (this.stopping || this.restartLoop || this.activationPromise) return;
     this.rejectAll(new Error(`OdooLS crashed: ${this.safeError(error)}`));
     this.readiness.setRecovery({ lastCrash: this.safeError(error) });
@@ -360,7 +369,7 @@ export class LspSession extends EventEmitter {
       if (!isCurrent()) return;
       if (change.kind === "delete") {
         if (this.documents.has(change.uri)) this.notify("textDocument/didClose", { textDocument: { uri: change.uri } });
-        this.documents.delete(change.uri); this.watcherDocuments.delete(change.uri);
+        this.documents.delete(change.uri); this.diagnostics.remove(change.uri); this.watcherDocuments.delete(change.uri);
         this.notify("workspace/didChangeWatchedFiles", { changes: [{ uri: change.uri, type: 3 }] });
         continue;
       }
@@ -377,7 +386,7 @@ export class LspSession extends EventEmitter {
     while (this.watcherDocuments.size > this.config.maxWatcherDocuments) {
       const evicted = this.watcherDocuments.keys().next().value as string;
       this.watcherDocuments.delete(evicted);
-      if (this.documents.delete(evicted)) this.notify("textDocument/didClose", { textDocument: { uri: evicted } });
+      if (this.documents.delete(evicted)) { this.diagnostics.remove(evicted); this.notify("textDocument/didClose", { textDocument: { uri: evicted } }); }
     }
   }
   private updateWatcherCount(): void { this.readiness.setRecovery({ watcherDocumentCount: this.watcherDocuments.size }); }

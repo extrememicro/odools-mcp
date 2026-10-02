@@ -8,7 +8,7 @@ Thank you for improving `odools-mcp`, an independent adapter maintained by **Ext
 - Discuss substantial behavior, protocol, dependency, runtime-pin, discovery, lifecycle, or threat-model changes in an issue before implementation.
 - Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in a public issue.
 - Keep the adapter independent: do not vendor, embed, fork, or patch OdooLS in this repository. Propose a fork only for an actual upstream fix, preferably with an upstream contribution path.
-- Preserve the public boundary of exactly four read-only MCP leaves—`status`, `definition`, `declaration`, and `references`—unless a separately reviewed release decision changes it.
+- Preserve the public boundary of exactly six read-only MCP leaves—`status`, `definition`, `declaration`, `references`, `hover`, and `file_diagnostics`—unless a separately reviewed release decision changes it.
 - Do not add credentials, customer/private source, local absolute paths, runtime archives, generated packages, logs, private benchmark corpora, or agent artifacts.
 - Keep the package private and GitHub-only unless maintainers make a separate distribution decision; do not prepare or perform npm publication.
 

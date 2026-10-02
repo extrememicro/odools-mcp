@@ -7,6 +7,8 @@ const recordFile = process.env.FAKE_LSP_RECORD_FILE;
 const profileIndex = process.argv.indexOf("--selected-config");
 const selectedProfile = profileIndex >= 0 && process.argv[profileIndex + 1] && !process.argv[profileIndex + 1].startsWith("--") ? process.argv[profileIndex + 1] : null;
 let buffer = Buffer.alloc(0); let reverse = new Set();
+let referencesTail = Promise.resolve();
+let shutdownPublication;
 let received = { argv: process.argv.slice(2), selectedProfile, configuredProfile: null, didOpen: [], didChange: [], didClose: [], didChangeWatchedFiles: [] };
 if (recordFile) appendFileSync(recordFile, `${JSON.stringify({ event: "spawn", pid: process.pid, argv: process.argv.slice(2) })}\n`);
 const record = () => { if (recordFile) appendFileSync(recordFile, `${JSON.stringify({ event: "snapshot", pid: process.pid, received })}\n`); };
@@ -18,6 +20,11 @@ process.stdin.on("data", (chunk) => {
     const match = /Content-Length:\s*(\d+)/i.exec(buffer.subarray(0, end).toString()); if (!match) process.exit(2);
     const length = Number(match[1]); if (buffer.length < end + 4 + length) return;
     const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString()); buffer = buffer.subarray(end + 4 + length);
+    if (["textDocument/didOpen", "textDocument/didChange"].includes(message.method) && message.params.textDocument.uri.includes("diagnostic-fixture.")) {
+      const document = message.params.textDocument;
+      const text = document.text ?? message.params.contentChanges[0].text;
+      send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: { uri: document.uri, version: document.version, diagnostics: text.includes("DIAGNOSTIC_FIXTURE_ISSUE") ? [{ message: "fixture issue", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }] : [] } });
+    }
     if (message.method === "textDocument/didOpen") received.didOpen.push(message.params || {});
     if (message.method === "textDocument/didChange") received.didChange.push(message.params || {});
     if (message.method === "textDocument/didClose") received.didClose.push(message.params || {});
@@ -41,7 +48,19 @@ process.stdin.on("data", (chunk) => {
       for (const notification of notifications) send({ jsonrpc: "2.0", method: notification.method, params: notification.params });
       send({ jsonrpc: "2.0", id: message.id, result: null });
     }
-    else if (message.method === "shutdown") send({ jsonrpc: "2.0", id: message.id, result: null });
+    else if (message.method === "textDocument/references" && process.env.FAKE_LSP_REFERENCES_DELAY_MS) {
+      referencesTail = referencesTail.then(() => new Promise((resolve) => setTimeout(resolve, Number(process.env.FAKE_LSP_REFERENCES_DELAY_MS)))).then(() => send({ jsonrpc: "2.0", id: message.id, result: [] }));
+    }
+    else if (message.method === "textDocument/hover") {
+      if (message.params.position.line === 1) continue;
+      const result = message.params.position.character === 0 ? null : { contents: { kind: "markdown", value: "**hover**" }, range: { start: { line: 0, character: 2 }, end: { line: 0, character: 7 } } };
+      send({ jsonrpc: "2.0", id: message.id, result });
+    }
+    else if (message.method === "test/shutdownPublication") { shutdownPublication = message.params; send({ jsonrpc: "2.0", id: message.id, result: null }); }
+    else if (message.method === "shutdown") {
+      if (shutdownPublication) send({ jsonrpc: "2.0", method: "textDocument/publishDiagnostics", params: shutdownPublication });
+      send({ jsonrpc: "2.0", id: message.id, result: null });
+    }
     else if (message.method === "slow") setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: null }), 500);
     else if (message.method === "test/crash") { if (crashMarker) { try { appendFileSync(crashMarker, "x"); } catch {} } process.exit(7); }
     else if (message.id !== undefined && message.method) send({ jsonrpc: "2.0", id: message.id, result: null });

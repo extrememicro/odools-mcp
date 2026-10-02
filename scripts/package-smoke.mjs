@@ -23,6 +23,7 @@ const work = await mkdtemp(join(tempRoot, "package-smoke-"));
 const project = join(work, "project");
 const expected = new Set([
   "CONTRIBUTING.md", "LICENSE", "README.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md",
+  "dist/file-diagnostics.js", "dist/hover.js", "dist/lsp/diagnostics.js",
   "dist/cli.js", "dist/config.js", "dist/diagnostic.js", "dist/discovery.js", "dist/generated-config.js", "dist/lifecycle.js", "dist/lsp/framing.js", "dist/lsp/positions.js", "dist/lsp/readiness.js", "dist/lsp/session.js", "dist/lsp/watcher.js", "dist/navigation.js",
   "dist/runtime/archive.js", "dist/runtime/constants.js", "dist/runtime/download.js", "dist/runtime/manager.js", "dist/runtime/process.js", "dist/security/path-guard.js", "dist/server.js", "dist/types.js",
   "examples/adapter-explicit.json", "examples/adapter-managed.json", "examples/opencode-v2.jsonc", "package.json",

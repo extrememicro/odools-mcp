@@ -31,6 +31,71 @@ describe("Workspace discovery and generated OdooLS config (Cluster 1)", () => {
     }
   };
 
+  it("AC-03: reconciles nested repository keys and explicit empty selections", async () => {
+    const src = resolve(tempRoot, "odoo/custom/src");
+    await createMarker(resolve(src, "odoo"), "odoo-bin", "odoo/__init__.py", "odoo/addons/base/__manifest__.py");
+    await createMarker(resolve(src, "vendor/team/addons/demo"), "__manifest__.py");
+    await createMarker(resolve(src, "private/unused"), "__manifest__.py");
+    await createDoodbaEvidence(tempRoot);
+    await rm(resolve(tempRoot, "odoo/auto/addons/unused"));
+    await writeFile(resolve(src, "addons.yaml"), 'vendor/team/addons: ["*"]\nprivate: []\n');
+    await symlink(resolve(src, "vendor/team/addons/demo"), resolve(tempRoot, "odoo/auto/addons/demo"));
+    const result = await discoverWorkspace(src);
+    expect(result.addonRoots).toContain(resolve(src, "vendor/team/addons"));
+    expect(result.addonRoots).not.toContain(resolve(src, "private"));
+    await symlink(resolve(src, "private/unused"), resolve(tempRoot, "odoo/auto/addons/unused"));
+    await expect(discoverWorkspace(src)).rejects.toThrow("CONFIG_GENERATED_MISMATCH");
+  });
+
+  it.each(["direct", "nested", "ancestor"])("AC-03: rejects canonical repository escape through %s symlink even with empty selection", async (kind) => {
+    const src = resolve(tempRoot, "odoo/custom/src");
+    await createMarker(resolve(src, "odoo"), "odoo-bin", "odoo/__init__.py", "odoo/addons/base/__manifest__.py");
+    await createDoodbaEvidence(tempRoot);
+    // A lexical-prefix sibling must not be mistaken for workspace containment.
+    const outside = `${src}-outside`;
+    await mkdir(resolve(outside, "repo"), { recursive: true });
+    const repository = kind === "direct" ? "repo" : "vendor/repo";
+    if (kind === "ancestor") await symlink(outside, resolve(src, "vendor"));
+    else {
+      await mkdir(dirname(resolve(src, repository)), { recursive: true });
+      await symlink(resolve(outside, "repo"), resolve(src, repository));
+    }
+    await writeFile(resolve(src, "addons.yaml"), `${repository}: []\n`);
+    await expect(discoverWorkspace(src)).rejects.toMatchObject({ code: "ODOOLS_DISCOVERY_ESCAPING_REPOSITORY" });
+  });
+
+  it.each([
+    ["private", "private: []\n"],
+    ["private", "---\n"],
+    ["odoo/addons", "private: []\n"],
+    ["odoo/odoo/addons", "private: []\n"],
+    ["odoo", "private: []\n"],
+  ])("AC-03: rejects canonical %s special root escaping to a lexical-prefix sibling (addons.yaml %j)", async (linked, addonsYaml) => {
+    const src = resolve(tempRoot, "odoo/custom/src");
+    // A lexical-prefix sibling must not be mistaken for workspace containment.
+    const outside = `${src}-outside`;
+    await createMarker(resolve(outside, "target"), "odoo-bin", "odoo/__init__.py", "odoo/addons/base/__manifest__.py", "addons/web/__manifest__.py", "escaped/__manifest__.py");
+    if (linked === "odoo") { await mkdir(src, { recursive: true }); await symlink(resolve(outside, "target"), resolve(src, "odoo")); }
+    else {
+      await createMarker(resolve(src, "odoo"), "odoo-bin", "odoo/__init__.py", "odoo/addons/base/__manifest__.py");
+      await rm(resolve(src, linked), { recursive: true, force: true });
+      await mkdir(dirname(resolve(src, linked)), { recursive: true });
+      const target = linked === "private" ? resolve(outside, "target") : linked === "odoo/addons" ? resolve(outside, "target", "addons") : resolve(outside, "target", "odoo", "addons");
+      await symlink(target, resolve(src, linked));
+    }
+    await createDoodbaEvidence(tempRoot);
+    await writeFile(resolve(src, "addons.yaml"), addonsYaml);
+    await expect(discoverWorkspace(src)).rejects.toMatchObject({ code: "ODOOLS_DISCOVERY_ESCAPING_REPOSITORY" });
+  });
+
+  it.each(["../escape", "/absolute", "vendor/../escape", "vendor//repo", "vendor/./repo", "vendor\\repo", "odoo/other", "private/other"])("AC-03: rejects unsafe or reserved repository %s", async (repository) => {
+    const src = resolve(tempRoot, "odoo/custom/src");
+    await createMarker(resolve(src, "odoo"), "odoo-bin", "odoo/__init__.py", "odoo/addons/base/__manifest__.py");
+    await createDoodbaEvidence(tempRoot);
+    await writeFile(resolve(src, "addons.yaml"), `${JSON.stringify(repository)}: ["*"]\n`);
+    await expect(discoverWorkspace(src)).rejects.toThrow("UNSUPPORTED_ADDONS_CONFIG");
+  });
+
   const createDoodbaEvidence = async (root: string) => {
     await writeFile(resolve(root, "tasks.py"), "from invoke import task\n# doodba-copier-template reference");
     await writeFile(resolve(root, ".copier-answers.yml"), "_template: https://github.com/Tecnativa/doodba-copier-template");
@@ -319,8 +384,8 @@ describe("Workspace discovery and generated OdooLS config (Cluster 1)", () => {
     await expect(discoverWorkspace(src)).rejects.toMatchObject({ code: "ODOOLS_DISCOVERY_CONFIG_GENERATED_MISMATCH" });
   });
 
-  it("AC-DUP-01: rejects arbitrary nested, traversal, absolute, and backslash repository keys", async () => {
-    for (const [index, key] of ["nested/repo", "../repo", "/absolute", "nested\\repo"].entries()) {
+  it("AC-DUP-01: rejects traversal, absolute, and backslash repository keys", async () => {
+    for (const [index, key] of ["../repo", "/absolute", "nested\\repo"].entries()) {
       const root = resolve(tempRoot, `invalid-key-${index}`); const src = resolve(root, "odoo", "custom", "src");
       await createMarker(resolve(src, "odoo"), "odoo-bin", "odoo/addons/base/__manifest__.py"); await createDoodbaEvidence(root); await writeFile(resolve(src, "addons.yaml"), `${JSON.stringify(key)}: ['*']\n`);
       await expect(discoverWorkspace(src)).rejects.toMatchObject({ code: "ODOOLS_DISCOVERY_UNSUPPORTED_ADDONS_CONFIG" });

@@ -158,18 +158,36 @@ describe("LSP session", () => {
     const original = session.open.bind(session);
     const openSpy = vi.spyOn(session, "open").mockImplementation(async (...args) => { await gate; await original(...args); });
     const notify = vi.spyOn(session, "notify");
+    const diagnostics = vi.spyOn(session.diagnostics, "open");
     const recovery = vi.spyOn(session.readiness, "setRecovery");
     try {
       await Promise.all(["first.py", "second.py"].map((name) => writeFile(join(session.config.workspace, name), "value = 1\n")));
       await waitFor(() => openSpy.mock.calls.length === 1);
       await session.stop();
-      notify.mockClear(); recovery.mockClear();
+      notify.mockClear(); diagnostics.mockClear(); recovery.mockClear();
       release(); await new Promise((resolveWait) => setTimeout(resolveWait, 150));
       expect(openSpy).toHaveBeenCalledTimes(1);
-      expect(notify).not.toHaveBeenCalled(); expect(recovery).not.toHaveBeenCalled();
+      expect(notify).not.toHaveBeenCalled(); expect(diagnostics).not.toHaveBeenCalled(); expect(recovery).not.toHaveBeenCalled();
       expect(session.documentCount).toBe(0);
       expect(session.readiness.snapshot()).toMatchObject({ watcherDocumentCount: 0, watcherState: "stopped" });
-    } finally { release(); openSpy.mockRestore(); notify.mockRestore(); recovery.mockRestore(); }
+    } finally { release(); openSpy.mockRestore(); notify.mockRestore(); diagnostics.mockRestore(); recovery.mockRestore(); }
+  });
+
+  it("AC-04: serial engine latency distinguishes single references from queued concurrent timeouts", async () => {
+    const workspace = await mkdtemp(join(tmpdir(), "odools-reference-queue-"));
+    process.env.FAKE_LSP_REFERENCES_DELAY_MS = "150";
+    const session = new LspSession(await fixture({ workspace, requestTimeoutMs: 250 }));
+    const params = { textDocument: { uri: pathToFileURL(join(workspace, "model.py")).href }, position: { line: 0, character: 0 } };
+    try {
+      await session.start();
+      for (let index = 0; index < 3; index += 1) expect(await session.request("textDocument/references", params)).toEqual([]);
+      const batch = await Promise.allSettled(Array.from({ length: 3 }, () => session.request("textDocument/references", params)));
+      expect(batch.map((result) => result.status)).toEqual(["fulfilled", "rejected", "rejected"]);
+      for (const result of batch.slice(1)) if (result.status === "rejected") expect(String(result.reason)).toContain("timed out");
+      expect(session.pendingCount).toBe(0);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(await session.request("textDocument/references", params)).toEqual([]);
+    } finally { await session.stop(); delete process.env.FAKE_LSP_REFERENCES_DELAY_MS; }
   });
 
   it("keeps reporting ready for warm requests and returns to ready after real loading", async () => {

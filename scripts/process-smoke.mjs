@@ -18,7 +18,7 @@ const serveArgs = serveArguments.length ? serveArguments : parseServeArgs(proces
 if (!executable || !fixturePath || !serveArgs.length) throw new Error("Usage: process-smoke.mjs EXECUTABLE FIXTURE.json SERVE_ARGS... (or corresponding ODOOLS_PROCESS_SMOKE_* env vars)");
 const fixture = JSON.parse(await readFile(fixturePath, "utf8"));
 for (const key of ["definition", "references"]) if (!fixture[key]?.path || !fixture[key]?.line || !fixture[key]?.column) throw new Error(`Fixture requires ${key} path, line and column`);
-const expected = ["declaration", "definition", "references", "status"];
+const expected = ["declaration", "definition", "file_diagnostics", "hover", "references", "status"];
 function optionValue(name) {
   const positions = serveArgs.flatMap((value, index) => value === name ? [index] : []);
   if (positions.length > 1) throw new Error(`Duplicate process-smoke serve argument: ${name}`);

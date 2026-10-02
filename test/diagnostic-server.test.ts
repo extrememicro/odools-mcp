@@ -46,7 +46,7 @@ async function toolNames(client: Client) {
   return (await client.listTools()).tools.map(({ name }) => name).sort();
 }
 
-const FOUR_TOOLS = ["declaration", "definition", "references", "status"];
+const FOUR_TOOLS = ["declaration", "definition", "file_diagnostics", "hover", "references", "status"];
 
 describe("discovery diagnostic MCP mode", () => {
   it("keeps all tools callable without backend or watcher activation and shuts down idempotently", async () => {
@@ -57,9 +57,13 @@ describe("discovery diagnostic MCP mode", () => {
     expect(await toolNames(connected.client)).toEqual(FOUR_TOOLS);
     const status = (await connected.client.callTool({ name: "status", arguments: {} })).structuredContent as any;
     expect(status).toMatchObject({ state: "failed", backendProcessState: "failed", processAlive: false, watcherEnabled: false, watcherState: "disabled" });
-    for (const name of FOUR_TOOLS.filter((name) => name !== "status")) {
+    const diagnostics = await connected.client.callTool({ name: "file_diagnostics", arguments: { path: "models/x.py", waitMs: 30_000 } });
+    expect(diagnostics.isError).toBe(true);
+    expect(diagnostics.structuredContent).toMatchObject({ state: "failed", status: "unavailable", clean: null, received: false, diagnostics: [], truncated: false, error: status.discovery.error });
+    for (const name of FOUR_TOOLS.filter((name) => !["status", "file_diagnostics"].includes(name))) {
       const result = (await connected.client.callTool({ name, arguments: { path: "models/x.py", line: 1, column: 1 } })).structuredContent as any;
-      expect(result).toMatchObject({ state: "failed", returned: 0, truncated: false, locations: [], noResult: false });
+      expect(result).toMatchObject({ state: "failed", truncated: false, noResult: false,
+        ...(name === "hover" ? { content: null, range: null } : { returned: 0, locations: [] }) });
       expect(result.error).toEqual(status.discovery.error);
     }
     await connected.client.close();

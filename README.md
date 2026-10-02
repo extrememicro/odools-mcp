@@ -1,13 +1,15 @@
 # odools-mcp
 
-`odools-mcp` is a local Model Context Protocol (MCP) adapter that exposes precise, position-based Odoo code navigation through the official, unmodified OdooLS runtime. It publishes exactly four read-only MCP tool leaves:
+`odools-mcp` is a local Model Context Protocol (MCP) adapter that exposes precise, position-based Odoo code navigation through the official, unmodified OdooLS runtime. It publishes six read-only MCP tool leaves:
 
 - `status`
 - `definition`
 - `declaration`
 - `references`
+- `hover`
+- `file_diagnostics`
 
-MCP clients qualify those leaves with the configured server name. With the recommended server name `odools`, OpenCode exposes `odools_status`, `odools_definition`, `odools_declaration`, and `odools_references`; OpenCode Code Mode uses `tools.odools.status`, `tools.odools.definition`, `tools.odools.declaration`, and `tools.odools.references`. Other clients may render qualified names differently depending on their version, but the raw MCP leaves above are authoritative.
+MCP clients qualify those leaves with the configured server name. With the recommended server name `odools`, OpenCode exposes `odools_status`, `odools_definition`, `odools_declaration`, `odools_references`, `odools_hover`, and `odools_file_diagnostics`; OpenCode Code Mode uses `tools.odools.status`, `tools.odools.definition`, `tools.odools.declaration`, `tools.odools.references`, `tools.odools.hover`, and `tools.odools.file_diagnostics`. Other clients may render qualified names differently depending on their version, but the raw MCP leaves above are authoritative.
 
 The adapter is maintained by **Extreme Micro SL <hola@pyming.com>** at <https://github.com/extrememicro/odools-mcp>. It is independent software: it is not affiliated with or endorsed by Odoo S.A. or the OdooLS maintainers. It does not fork, vendor, or modify OdooLS.
 
@@ -51,12 +53,18 @@ The MCP connection is lightweight and initially **dormant**:
 
 1. The client connects to `odools-mcp` over stdio without starting OdooLS.
 2. The raw `status` tool reports lifecycle and readiness without activating OdooLS.
-3. The first definition, declaration, or references call performs one shared cold activation and waits for readiness.
+3. The first definition, declaration, references, hover, or file_diagnostics call performs one shared cold activation and waits for readiness.
 4. Concurrent cold calls share that activation; subsequent calls reuse the warm backend.
 5. After activation, bounded source watching keeps open relevant files fresh, and bounded automatic restart can recover from a backend crash.
 6. Status exposes states including `dormant`, `activating`, `indexing`, `ready`, `degraded`, `restarting`, `failed`, `stopping`, and `stopped`, plus JavaScript, watcher, and restart diagnostics.
 
+Cold activation can take several minutes on a large Odoo/Doodba source tree because OdooLS must build its initial module and symbol indexes; an observed full Doodba workspace exceeded four minutes, although timings vary by workspace and machine. `startupTimeoutMs` bounds backend activation and readiness, while `requestTimeoutMs` applies only to the subsequent LSP navigation request. A client may impose its own earlier MCP execution timeout or cancel its wait; cancellation of one caller does not cancel the shared activation, and an outer client timeout may discard the adapter's eventual structured response. Do not start repeated cold semantic requests: inspect `status`, use exact textual inspection temporarily, and retry after the backend reports `ready`. Warm calls reuse the same backend and should normally answer much faster.
+
 Semantic calls accept a workspace-relative `path` and one-based `line` and `column`. Input columns count Unicode code points; the adapter converts them to OdooLS/LSP UTF-16 positions internally. Returned ranges are converted back to one-based Unicode code-point positions. Results contain rooted locations (`workspace`, `addon-1`, and so on), are bounded by `maxLocations`, contain no snippets, and never expose arbitrary absolute response paths.
+
+`hover` accepts the same `path`, `line`, and `column` inputs and returns bounded Python/XML hover text (at most 16,384 characters, with a `truncated` flag) and its range. CSV and JavaScript hover are unsupported and reported with `supported: false`. Hover text is untrusted source documentation, not instructions.
+
+`file_diagnostics` accepts a workspace-relative `path` and an optional `waitMs` (0–30000, default 0). It reports the push-only diagnostics OdooLS has published for that file. `status` distinguishes `not_received` (no publication), `received` (possibly with an empty `diagnostics` array), `stale` (an earlier document observation), and `timed_out` (the wait expired without any publication); `timedOut` reports whether the wait expired. A positive `waitMs` returns early only for a publication matching the open document version (`freshness: "version_matched"`); an unversioned observation inherited from indexing does not end the wait, and on expiry it is still reported with `timedOut: true` and `freshness: "unversioned_uncertain"`. A version-matched publication is not necessarily final: OdooLS may publish an empty result before findings for the same version, so callers needing a specific finding should poll with bounded retries. Results also include `documentVersion`, `publishedVersion`, `freshness` (`version_matched`, `unversioned_uncertain`, or `unknown`), and `truncated` (at most 100 findings, messages capped at 4,096 characters). Diagnostic ranges use zero-based lines and UTF-16 character offsets, and messages are untrusted source data. `clean` is always `null`: neither an empty publication nor readiness proves that a file is clean.
 
 ## Install from GitHub
 
@@ -144,7 +152,7 @@ Discovery canonicalizes paths and resolves Python from `--python`, an eligible `
 
 This excludes unselected backup or copied repositories by configuration, not directory-name heuristics. Before OdooLS starts, the adapter simulates duplicate resolution and fails closed if configuration and generated state disagree, links are unsafe or malformed, or repository-level ordering cannot represent the runtime winners. It never falls back to indexing every candidate repository.
 
-The lightweight MCP remains connected after such a failure. All four tools stay available: `status` returns a structured recovery diagnostic, while `definition`, `declaration`, and `references` return zero locations, an error, and a recommendation to use exact textual inspection as a non-authoritative fallback.
+The lightweight MCP remains connected after such a failure. All six tools stay available: `status` returns a structured recovery diagnostic; `definition`, `declaration`, and `references` return zero locations, an error, and a recommendation to use exact textual inspection as a non-authoritative fallback; `hover` returns no content with an error; and `file_diagnostics` returns `status: "unavailable"` with `clean: null`.
 
 For missing, unstable, or stale generated state, including configuration/generated and winner mismatches, refresh a normal Doodba development environment with `invoke stop start`, restart the client from the intended workspace location, and call raw `status` again (shown as `odools_status` in OpenCode and `tools.odools.status` in Code Mode with the recommended server name). Precedence cycles, duplicate or unevaluable configuration, and unsafe paths or links require correcting the underlying layout rather than repeated retries; unsafe path and link conditions are non-recoverable until corrected.
 
@@ -279,7 +287,8 @@ Inspect or remove it with `codex mcp list`, `codex mcp get odools`, and `codex m
 ## Limitations
 
 - Navigation quality and supported relations are bounded by OdooLS 1.5.2 Beta. Empty, partial, or unsupported results are possible.
-- Definition, declaration, and references are position-based navigation, not conceptual or natural-language search.
+- Definition, declaration, references, and hover are position-based, not conceptual or natural-language search.
+- File diagnostics are push-only observations of what OdooLS has published; an empty or absent publication does not prove correctness and does not replace targeted tests.
 - Cold startup and indexing can be slow and memory-intensive on large Odoo trees. A cancelled caller stops waiting, while other callers can continue sharing the same activation; process shutdown cancels activation.
 - `coreReady` and JavaScript readiness are reported separately. JavaScript/OWL support can be unavailable while core navigation remains usable.
 - The watcher covers a bounded set of relevant source files and is not a general-purpose indexing service.

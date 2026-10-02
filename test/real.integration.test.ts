@@ -46,6 +46,7 @@ suite("real generated discovery OdooLS integration", () => {
     expect(tools.tools.map((tool) => tool.name).sort()).toEqual([
       "declaration",
       "definition",
+      "hover",
       "references",
       "status",
     ]);

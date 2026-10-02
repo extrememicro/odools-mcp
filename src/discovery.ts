@@ -139,6 +139,9 @@ async function discoverConventionalAddonRoots(workspace: string): Promise<string
 }
 
 interface AddonSelection { repository: string; patterns: string[]; condition: "active" | "unknown" }
+function safeRepositoryPath(repository: string): boolean {
+  return !repository.includes("\\") && repository.split("/").every((part) => Boolean(part) && part !== "." && part !== "..");
+}
 type YamlMapping = Record<string, unknown>;
 
 function stringList(value: unknown, context: string): string[] {
@@ -176,13 +179,14 @@ function parseAddonsYaml(content: string, environment: NodeJS.ProcessEnv): Addon
     for (const [repository, patterns] of Object.entries(document)) {
       if (repository === "ONLY" || repository === "ENV") continue;
       const ordinary = repository !== "odoo/addons" && repository !== "private";
-      if (!repository || (ordinary && (repository.includes("/") || repository.includes("\\") || repository === "." || repository === ".."))) throw new DiscoveryError("ODOOLS_DISCOVERY_UNSUPPORTED_ADDONS_CONFIG", `unsafe repository key ${repository}`);
+      if (!repository || (ordinary && !safeRepositoryPath(repository))) throw new DiscoveryError("ODOOLS_DISCOVERY_UNSUPPORTED_ADDONS_CONFIG", `unsafe repository key ${repository}`);
       const bucket = flattened.get(repository) ?? { active: new Set<string>(), unknown: new Set<string>() };
-      for (const pattern of stringList(patterns, repository)) bucket[condition].add(pattern);
+      for (const pattern of Array.isArray(patterns) && patterns.length === 0 ? [] : stringList(patterns, repository)) bucket[condition].add(pattern);
       flattened.set(repository, bucket);
     }
   }
   return [...flattened].flatMap(([repository, patterns]) => [
+    ...(!patterns.active.size && !patterns.unknown.size ? [{ repository, patterns: [], condition: "active" as const }] : []),
     ...(patterns.active.size ? [{ repository, patterns: [...patterns.active], condition: "active" as const }] : []),
     ...(patterns.unknown.size ? [{ repository, patterns: [...patterns.unknown], condition: "unknown" as const }] : []),
   ]);
@@ -283,6 +287,12 @@ function topologicalRoots(required: Set<string>, edges: Map<string, Set<string>>
   return ordered;
 }
 
+async function containedSpecialRoot(path: string, workspace: string, label: string): Promise<string> {
+  const canonicalPath = await realpath(path);
+  if (!within(canonicalPath, workspace)) throw new DiscoveryError("ODOOLS_DISCOVERY_ESCAPING_REPOSITORY", `${label} root escapes the source workspace`);
+  return canonicalPath;
+}
+
 async function discoverDoodba(workspace: string, doodbaRoot: string): Promise<{addonRoots: string[]; metadata: DiscoveryMetadata}> {
   const addonsPath = await resolveAddonsConfig(workspace);
   if (!addonsPath) throw new DiscoveryError("ODOOLS_DISCOVERY_MISSING_ADDONS_CONFIG", "addons.yaml or addons.yml is missing");
@@ -299,13 +309,14 @@ async function discoverDoodba(workspace: string, doodbaRoot: string): Promise<{a
     specialSelections.set(selection.repository, aggregate);
   }
   for (const selection of selections.filter((item) => item.repository !== "private" && item.repository !== "odoo/addons")) {
-    if (selection.repository === "odoo" || selection.repository.includes("/") || selection.repository.includes("\\")) throw new DiscoveryError("ODOOLS_DISCOVERY_UNSUPPORTED_ADDONS_CONFIG", `reserved or unsafe repository key ${selection.repository}`);
+    if (["odoo", "private"].includes(selection.repository.split("/")[0]!) || !safeRepositoryPath(selection.repository)) throw new DiscoveryError("ODOOLS_DISCOVERY_UNSUPPORTED_ADDONS_CONFIG", `reserved or unsafe repository key ${selection.repository}`);
     const path = resolve(workspace, selection.repository);
     if (!await isDirectory(path)) {
       if (selection.condition === "unknown") continue;
       throw new DiscoveryError("ODOOLS_DISCOVERY_CONFIG_GENERATED_MISMATCH", `selected repository ${selection.repository} is absent`);
     }
     const canonicalPath = await realpath(path);
+    if (!within(canonicalPath, workspace)) throw new DiscoveryError("ODOOLS_DISCOVERY_ESCAPING_REPOSITORY", `selected repository ${selection.repository} escapes the source workspace`);
     const physicalModules = new Set(await moduleNames(canonicalPath));
     const modules = new Set([...physicalModules].filter((name) => selection.patterns.some((pattern) => globMatches(pattern, name))));
     const existing = roots.find((root) => root.path === canonicalPath);
@@ -320,25 +331,28 @@ async function discoverDoodba(workspace: string, doodbaRoot: string): Promise<{a
   }
   const privatePath = resolve(workspace, "private");
   if (await isDirectory(privatePath)) {
-    const physicalModules = new Set(await moduleNames(privatePath));
+    // Contain the canonical root before enumeration, even when `private: []` selects nothing.
+    const canonicalPrivate = await containedSpecialRoot(privatePath, workspace, "private");
+    const physicalModules = new Set(await moduleNames(canonicalPrivate));
     const configured = specialSelections.get("private");
     const activePatterns = configured ? [...configured.active] : ["*"];
     const unknownPatterns = [...(configured?.unknown ?? [])];
     const activeModules = new Set([...physicalModules].filter((name) => activePatterns.some((pattern) => globMatches(pattern, name))));
     const unknownModules = new Set([...physicalModules].filter((name) => unknownPatterns.some((pattern) => globMatches(pattern, name))));
     const modules = new Set([...activeModules, ...unknownModules]);
-    roots.push({ path: await realpath(privatePath), kind: "private", modules, activeModules, unknownModules, physicalModules });
+    roots.push({ path: canonicalPrivate, kind: "private", modules, activeModules, unknownModules, physicalModules });
   }
   for (const corePath of [resolve(workspace, "odoo", "addons"), resolve(workspace, "odoo", "odoo", "addons")]) {
     if (await isDirectory(corePath)) {
-      const physicalModules = new Set(await moduleNames(corePath));
+      const canonicalCore = await containedSpecialRoot(corePath, workspace, "core addon");
+      const physicalModules = new Set(await moduleNames(canonicalCore));
       const configured = specialSelections.get("odoo/addons");
       const activePatterns = configured ? [...configured.active] : ["*"];
       const unknownPatterns = [...(configured?.unknown ?? [])];
       const activeModules = new Set([...physicalModules].filter((name) => activePatterns.some((pattern) => globMatches(pattern, name))));
       const unknownModules = new Set([...physicalModules].filter((name) => unknownPatterns.some((pattern) => globMatches(pattern, name))));
       const modules = new Set([...activeModules, ...unknownModules]);
-      roots.push({ path: await realpath(corePath), kind: "core", modules, activeModules, unknownModules, physicalModules });
+      roots.push({ path: canonicalCore, kind: "core", modules, activeModules, unknownModules, physicalModules });
     }
   }
 

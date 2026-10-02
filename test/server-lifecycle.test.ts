@@ -34,11 +34,51 @@ function expectClean(server: OdooLsMcpServer): void {
 }
 
 describe("MCP/LSP lifecycle composition", () => {
-  it("connects dormant, lists exactly four tools, and activates once for concurrent and immediate warm semantic calls", async () => {
+  it("exposes hover with lazy activation, Unicode, errors and timeout cancellation", async () => {
+    const server = await makeServer({ watcher: false });
+    const workspace = (server as unknown as { config: { workspace: string } }).config.workspace;
+    await writeFile(join(workspace, "hover.py"), "😀value\nwait\n");
+    await writeFile(join(workspace, "hover.xml"), "😀value\n");
+    await writeFile(join(workspace, "hover.js"), "value\n");
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "hover-test", version: "1" });
+    try {
+      await server.start(serverTransport); await client.connect(clientTransport);
+      const call = async (path: string, line = 1, column = 2) => await client.callTool({ name: "hover", arguments: { path, line, column } });
+      expect((await call("hover.js")).structuredContent).toMatchObject({ supported: false, noResult: true, state: "dormant" });
+      expect(server.lsp.childPid).toBeUndefined();
+      const first = await call("hover.py");
+      expect(first.isError).not.toBe(true);
+      expect(first.structuredContent).toMatchObject({ coldStart: true, content: { kind: "markdown", value: "**hover**" }, range: { start: { line: 1, column: 2 }, end: { line: 1, column: 7 } }, noResult: false });
+      expect((await call("hover.xml")).structuredContent).toMatchObject({ coldStart: false, content: { value: "**hover**" } });
+      expect((await call("hover.py", 1, 1)).structuredContent).toMatchObject({ noResult: true, error: null });
+      expect((await call("../escape.py")).isError).toBe(true);
+      const timedOut = await call("hover.py", 2, 1);
+      expect(timedOut.isError).toBe(true);
+      expect(timedOut.structuredContent).toMatchObject({ noResult: false, content: null });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(server.lsp.cancellationIds.length).toBeGreaterThan(0);
+    } finally { await client.close(); await server.stop(); }
+  });
+  it.each(["definition", "declaration", "references"])("AC-01: %s activates without a status preflight", async (name) => {
+    const server = await makeServer(); const recordFile = join(server.lsp.config.workspace, "spawn.jsonl");
+    process.env.FAKE_LSP_RECORD_FILE = recordFile;
+    await writeFile(join(server.lsp.config.workspace, "model.py"), "class Demo: pass\n");
+    const client = new Client({ name: "semantic-first", version: "1" }); const [a, b] = InMemoryTransport.createLinkedPair();
+    try {
+      await server.start(a); await client.connect(b);
+      const result = await client.callTool({ name, arguments: { path: "model.py", line: 1, column: 2 } });
+      expect(result.isError).toBe(false);
+      expect((result.structuredContent as any).coldStart).toBe(true);
+      expect(await spawnPids(recordFile)).toHaveLength(1);
+    } finally { await client.close(); await server.stop(); delete process.env.FAKE_LSP_RECORD_FILE; }
+  });
+
+  it("connects dormant, lists six tools, and activates once for concurrent and immediate warm semantic calls", async () => {
     const recordFile = join(await mkdtemp(join(tmpdir(), "odools-spawns-")), "spawns.jsonl"); process.env.FAKE_LSP_RECORD_FILE = recordFile;
     const server = await makeServer({ quietMs: 100 }); const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const client = new Client({ name: "test", version: "1" }); await Promise.all([server.start(serverTransport), client.connect(clientTransport)]);
-    expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["declaration", "definition", "references", "status"]);
+    expect((await client.listTools()).tools.map((tool) => tool.name).sort()).toEqual(["declaration", "definition", "file_diagnostics", "hover", "references", "status"]);
     for (let index = 0; index < 2; index++) {
       const status = await client.callTool({ name: "status", arguments: {} });
       expect(status.structuredContent).toMatchObject({ state: "dormant", processAlive: false, watcherState: "stopped", watcherDocumentCount: 0, activationPolicy: "on-semantic-tool" });
